@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.idx
+.ipynb_checkpoints/
+/outputs
+/tests
+/configs

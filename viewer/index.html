@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI4Water · Weather explorer</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/plotly.min.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">≈</span><div>AI4Water<small>WEATHER EXPLORER</small></div></div>
+    <div class="sidebar-label">SIMULATION</div>
+    <label for="run">Experiment</label><select id="run" aria-label="Experiment"></select>
+    <p id="run-info" class="muted">Finding completed simulations…</p>
+    <div class="sidebar-label">EXPLORE</div>
+    <label for="metric">Map variable</label><select id="metric">
+      <option value="rain">Precipitation</option><option value="tmean">Mean temperature</option>
+      <option value="tmin">Minimum temperature</option><option value="tmax">Maximum temperature</option>
+    </select>
+    <label for="scope">Time-series location</label><select id="scope"><option value="area">Whole area</option><option value="cell">Selected cell</option></select>
+    <p id="cell-label" class="muted">Select any coloured cell on a map.</p>
+    <div class="sidebar-label">SUMMARY WINDOW</div>
+    <label for="start">From</label><input id="start" type="date">
+    <label for="end">Through</label><input id="end" type="date">
+    <button id="reset" class="secondary">Reset full period</button>
+    <button id="download">↓ Download daily CSV</button>
+    <p class="sidebar-note">EGGS-WG generates stochastic weather from historical statistics. Dates label simulated days; these are not weather forecasts.</p>
+    <div class="sidebar-footer">ERA5-Land · UTC days<br><span id="reference"></span></div>
+  </aside>
+  <main>
+    <header><div><p class="eyebrow">AI4WATER CASE STUDIES</p><h1>Weather, across the landscape.</h1><p id="subtitle">Loading simulation outputs…</p></div><span class="status" id="status">Loading</span></header>
+    <!--ASSESSMENT-->
+    <div id="error" class="error" hidden></div>
+    <section id="scenario-panel" class="card scenario-panel" hidden>
+      <div class="card-heading"><div><h2>Choose a scenario</h2><p id="ensemble-caption"></p></div><a id="validation-link" class="validation-link" target="_blank" rel="noopener" hidden>Compare with history ↗</a><span class="tag" id="ensemble-count"></span></div>
+      <div class="scenario-controls">
+        <label>Regional metric<select id="selection-metric" aria-label="Scenario selection metric"></select></label>
+        <label>Percentile<input id="percentile" type="number" min="0" max="100" step="1" value="10" aria-label="Scenario percentile"></label>
+        <button id="select-scenario">Select closest scenario</button>
+        <button id="download-selection" class="selection-download">↓ Selection JSON</button>
+      </div>
+      <p id="selection-result" class="selection-result" aria-live="polite"></p>
+      <div id="ensemble-chart" class="ensemble-chart"></div>
+      <p id="scenario-method" class="scenario-method"></p>
+      <details class="scenario-monthly"><summary>Selected scenario: monthly rainfall, PET, SPI and SPEI</summary><div id="scenario-monthly"></div></details>
+    </section>
+    <section class="metrics" aria-label="Window summary">
+      <div><span>MEAN TEMPERATURE</span><strong id="mean-temp">—</strong><small id="summary-scope">Whole area</small></div>
+      <div><span>PEAK CELL TEMPERATURE</span><strong id="peak-temp">—</strong><small>Highest hourly value in the window</small></div>
+      <div><span>RAINFALL TOTAL</span><strong id="total-rain">—</strong><small>Mean accumulated depth over the window</small></div>
+      <div><span>WET-DAY SHARE</span><strong id="wet-share">—</strong><small>Cell-days with at least 1 mm rainfall</small></div>
+    </section>
+    <section class="time-control card"><div><span class="eyebrow">DAILY SNAPSHOT</span><strong id="day-label">—</strong></div><button id="play" class="play" aria-label="Play daily animation">▶</button><input id="day-slider" type="range" min="0" max="1" value="0" aria-label="Simulation day"><input id="day" type="date" aria-label="Snapshot date"></section>
+    <section class="maps">
+      <article class="card"><div class="card-heading"><div><h2>One day</h2><p id="daily-caption">Select a date to inspect the weather field.</p></div><span class="tag">CLICK A CELL</span></div><div id="snapshot-map" class="map"></div></article>
+      <article class="card"><div class="card-heading"><div><h2>The selected window</h2><p id="aggregate-caption">Accumulated rainfall across the period.</p></div><span class="tag" id="window-label">—</span></div><div id="period-map" class="map"></div></article>
+    </section>
+    <section class="card chart-card"><div class="card-heading"><div><h2>The daily rhythm</h2><p id="series-caption">Temperature range, daily rainfall, and cumulative rainfall.</p></div><span class="tag">ZOOM &amp; HOVER</span></div><div id="time-series" class="wide-chart"></div></section>
+    <section class="two-up">
+      <article class="card"><div class="card-heading"><div><h2>Month by month</h2><p>Simulated rainfall and temperature against the historical reference climate.</p></div></div><div id="monthly-chart" class="small-chart"></div></article>
+      <article class="card"><div class="card-heading"><div><h2>Inside the day</h2><p id="hourly-caption">Hourly temperature at the selected cell.</p></div></div><div id="hourly-chart" class="small-chart"></div></article>
+    </section>
+    <details class="card quality"><summary id="quality-summary">Training data &amp; fit checks</summary><div id="quality-content"></div></details>
+    <footer>Spatial means use cell-area weights approximated by cos(latitude). Maps follow the available ERA5-Land grid; uncoloured cells are outside the selected domain or unavailable.</footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

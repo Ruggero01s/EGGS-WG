@@ -10,15 +10,13 @@ from scipy.special import erf
 import scipy.stats as scistat
 import scipy
 
-def Data_load(variable_name,Directory):
+def Data_load(variable_name,Directory,start_year=1950,end_year=2022):
     '''Load in the simulation coefficeints from generated files'''
-    start_year='1950'
-    end_year='2022'
-    year_str=start_year+'_'+end_year
+    year_str=str(start_year)+'_'+str(end_year)
     filename=Directory+variable_name+'_PreSim_Coeff_'+year_str+'.nc'
     tmp_data=xr.open_dataset(filename)
-    tmp_data.drop_vars('Residual_Grid')
-    return tmp_data
+    tmp_data=tmp_data.drop_vars('Residual_Grid')
+    return tmp_data.load()
 
 def XY_load(variable_list,Directory):
     '''Load in the simulation coupling coefficeints'''
@@ -68,98 +66,76 @@ def Precipitation_Calculate(Alpha,Beta1,Beta2,occur_rng,amount_rng,P_Value):
         count+=1
     return 1 - Beta*np.log(1 - V_prob)
 
-def Simulation_Init(Input_params,Spin_Up_num):
+def Simulation_Init(Input_params,Spin_Up_num,month=0):
     '''Initiate the simulation'''
     P_vector=np.zeros(Input_params['S_len'])
     Var_Vector=np.zeros(len(Input_params['H_XY']['X_matrix'].values[0,:,0]))
-    I_P0=scistat.norm.ppf(Input_params['TP']['P0_Vector'].values[:,0],0,1)
-    I_P1=scistat.norm.ppf(Input_params['TP']['P1_Vector'].values[:,0],0,1)
-    HX=Input_params['H_XY']['X_matrix'].values[0,:,:]
-    HY=Input_params['H_XY']['Y_matrix'].values[0,:,:]
+    I_P0=scistat.norm.ppf(Input_params['TP']['P0_Vector'].values[:,month],0,1)
+    I_P1=scistat.norm.ppf(Input_params['TP']['P1_Vector'].values[:,month],0,1)
+    HX=Input_params['H_XY']['X_matrix'].values[month,:,:]
+    HY=Input_params['H_XY']['Y_matrix'].values[month,:,:]
+    rng = Input_params.get('rng', np.random.default_rng())
+    occurrence_factor = np.linalg.cholesky(Input_params['TP']['Brissette_Occurrence_Omega'].values[:,:,month])
     for i in range(0,Spin_Up_num):
         #First Initialize precipitation
-        prob_vector=np.squeeze(I_P0*[abs(P_vector-1)] + I_P1*P_vector)
-        [Update_vector,_]=Simulate_Day_Occur(P_vector,prob_vector,
-                Input_params['TP']['Brissette_Occurrence_Omega'].values[:,:,0])
-        P_vector=np.squeeze(Update_vector*1)
+        prob_vector=np.squeeze(np.where(P_vector.astype(bool), I_P1, I_P0))
+        Update_vector = occurrence_factor @ rng.standard_normal(len(P_vector)) <= prob_vector
+        P_vector=np.atleast_1d(Update_vector*1)
         #Next T 
         Day_var=np.zeros([len(Input_params['H_XY']['X_matrix'].values[0,:,0]),24])
         for i in range(0,24):
-            var_random_vector=np.random.default_rng().standard_normal(len(Var_Vector))
+            var_random_vector=rng.standard_normal(len(Var_Vector))
             Var_Vector=np.matmul(HX,Var_Vector)+np.matmul(HY,var_random_vector)
             Day_var[:,i]=Var_Vector
     Init_vectors={'tp':P_vector,'var':Var_Vector}
     return Init_vectors
 
 
-def Full_Simulate_Day(Sim_Params,Date,input_dict):
-    '''Simulate a day of model data'''
-    #Runs a day of simulation
-    I_mon=Date.astype('datetime64[M]').astype(int) % 12
-    P_vector=input_dict['tp']
-    Var_Vector=input_dict['var']
-    I_P0=scistat.norm.ppf(Sim_Params['TP']['P0_Vector'].values[:,I_mon],0,1)
-    I_P1=scistat.norm.ppf(Sim_Params['TP']['P1_Vector'].values[:,I_mon],0,1)
-
-    HX=Sim_Params['H_XY']['X_matrix'].values[I_mon,:,:]
-    HY=Sim_Params['H_XY']['Y_matrix'].values[I_mon,:,:]
-    #Simulate precipitation
-    Params=[Sim_Params['TP']['Alpha_Vector'].values[:,I_mon],
-            Sim_Params['TP']['Beta_1_Vector'].values[:,I_mon],
-            Sim_Params['TP']['Beta_2_Vector'].values[:,I_mon]]
-    prob_vector=np.squeeze(I_P0*[abs(P_vector-1)] + I_P1*P_vector)
-    [Update_vector,RNG]=Simulate_Day_Occur(P_vector,prob_vector,
-            Sim_Params['TP']['Brissette_Occurrence_Omega'].values[:,:,I_mon])
-    P_vector=np.squeeze(Update_vector*1)
-    Update_vector2=Simulate_Day_Amount(P_vector,
-            Sim_Params['TP']['Brissette_Amounts_Omega'].values[:,:,I_mon],
-            RNG,Params,prob_vector)
-    amount_vector=np.squeeze(Update_vector2*1)
-    #Next T 
-    Day_var=np.zeros([len(Sim_Params['H_XY']['X_matrix'].values[0,:,0]),24])
-    R_var=np.zeros([len(Sim_Params['H_XY']['X_matrix'].values[0,:,0]),24])
-    varlen=len(Var_Vector)
-    for i in range(0,24):
-        var_random_vector=np.random.default_rng().standard_normal(varlen)
-        Var_Vector=np.matmul(HX,Var_Vector)+np.matmul(HY,var_random_vector)
-        Day_var[:,i]=Var_Vector
-        R_var[:,i]=var_random_vector
-    Res_vectors={'tp':P_vector,'var':Var_Vector}
-    #Need to convert the residual values to the output variables
-    t2m=np.zeros([len(P_vector),24])
-    d2m=np.zeros([len(P_vector),24])
-    #determine hour of year
-    i_day=Date.astype('datetime64[D]')-Date.astype('datetime64[Y]')
-    i_day=i_day.astype(int)
-    if i_day==365:
-        i_day=364
-    t2m_mean_D=Sim_Params['Var_data']['t2m']['Fourier_Mean_Dry'].values[
-        i_day*24:(i_day+1)*24,:]
-    t2m_std_D=Sim_Params['Var_data']['t2m']['Fourier_Std_Dry'].values[
-        i_day*24:(i_day+1)*24,:]
-    d2m_mean_D=Sim_Params['Var_data']['d2m']['Fourier_Mean_Dry'].values[
-        i_day*24:(i_day+1)*24,:]
-    d2m_std_D=Sim_Params['Var_data']['d2m']['Fourier_Std_Dry'].values[
-        i_day*24:(i_day+1)*24,:]
-    t2m_mean_W=Sim_Params['Var_data']['t2m']['Fourier_Mean_Wet'].values[
-        i_day*24:(i_day+1)*24,:]
-    t2m_std_W=Sim_Params['Var_data']['t2m']['Fourier_Std_Wet'].values[
-        i_day*24:(i_day+1)*24,:]
-    d2m_mean_W=Sim_Params['Var_data']['d2m']['Fourier_Mean_Wet'].values[
-        i_day*24:(i_day+1)*24,:]
-    d2m_std_W=Sim_Params['Var_data']['d2m']['Fourier_Std_Wet'].values[
-        i_day*24:(i_day+1)*24,:]
-
-    for ihour in range(0,24):
-        T_M_V=P_vector*t2m_mean_W[ihour,:]+np.abs(1-P_vector)*t2m_mean_D[ihour,:]
-        T_S_V=P_vector*t2m_std_W[ihour,:]+np.abs(1-P_vector)*t2m_std_D[ihour,:]
-        D_M_V=P_vector*d2m_mean_W[ihour,:]+np.abs(1-P_vector)*d2m_mean_D[ihour,:]
-        D_S_V=P_vector*d2m_std_W[ihour,:]+np.abs(1-P_vector)*d2m_std_D[ihour,:]
-        t2m[:,ihour]=Var_Vector[0:len(P_vector)]*T_S_V+T_M_V
-        d2m[:,ihour]=Var_Vector[len(P_vector):len(P_vector)*2]*D_S_V+D_M_V
-    Output_variables={'tp_o':P_vector,'tp_a':amount_vector,'t2m':t2m,
-                      'd2m':d2m}
-    return Output_variables,Res_vectors
+def Full_Simulate_Day(Sim_Params, Date, input_dict):
+    """Simulate daily precipitation and each configured hourly variable."""
+    month = int(Date.astype('datetime64[M]').astype(int) % 12)
+    previous = np.atleast_1d(input_dict['tp'])
+    residual = input_dict['var']
+    rain = Sim_Params['TP']
+    p0 = scistat.norm.ppf(rain['P0_Vector'].values[:, month])
+    p1 = scistat.norm.ppf(rain['P1_Vector'].values[:, month])
+    # Selecting avoids 0 * infinity when a fitted probability is exactly 0 or 1.
+    threshold = np.where(previous.astype(bool), p1, p0)
+    rng = Sim_Params.get('rng')
+    if rng is None:
+        occurrence, noise = Simulate_Day_Occur(
+            previous, threshold, rain['Brissette_Occurrence_Omega'].values[:, :, month])
+    else:
+        noise = Sim_Params['occurrence_cholesky'][month] @ rng.standard_normal(len(previous))
+        occurrence = noise <= threshold
+    occurrence = np.atleast_1d(occurrence.astype(int))
+    coefficients = [rain[name].values[:, month] for name in
+                    ('Alpha_Vector', 'Beta_1_Vector', 'Beta_2_Vector')]
+    if rng is None:
+        amounts = Simulate_Day_Amount(
+            occurrence, rain['Brissette_Amounts_Omega'].values[:, :, month],
+            noise, coefficients, threshold)
+    else:
+        amount_noise = Sim_Params['amount_cholesky'][month] @ rng.standard_normal(len(previous))
+        amounts = Precipitation_Calculate(*coefficients, noise, amount_noise, threshold) * occurrence
+    x = Sim_Params['H_XY']['X_matrix'].values[month]
+    y = Sim_Params['H_XY']['Y_matrix'].values[month]
+    hourly_residual = np.empty((len(residual), 24))
+    for hour in range(24):
+        residual = x @ residual + y @ (rng if rng is not None else np.random.default_rng()).standard_normal(len(residual))
+        hourly_residual[:, hour] = residual
+    day = min(int((Date.astype('datetime64[D]') - Date.astype('datetime64[Y]')).astype(int)), 364)
+    hours = slice(day * 24, (day + 1) * 24)
+    output = {'tp_o': occurrence, 'tp_a': np.atleast_1d(amounts)}
+    stations = len(occurrence)
+    for index, name in enumerate(Sim_Params['Var_list']):
+        data = Sim_Params['Var_data'][name]
+        mean = np.where(occurrence[None, :], data['Fourier_Mean_Wet'].values[hours],
+                        data['Fourier_Mean_Dry'].values[hours])
+        std = np.where(occurrence[None, :], data['Fourier_Std_Wet'].values[hours],
+                       data['Fourier_Std_Dry'].values[hours])
+        output[name] = hourly_residual[index * stations:(index + 1) * stations] * std.T + mean.T
+    return output, {'tp': occurrence, 'var': residual}
 
 
 def Alt_CDF_Calculate(in_res,tp_o,Prob_vec,W_Table,D_Table):
@@ -202,163 +178,98 @@ def D2M_2_RH(in_data):
     RH=RH*100
     return RH
 
-def Save_decade(Data,Filename):
-    '''Save a decade of data to disk'''
-    #Runs a day of simulation
-    new_dates=[]
-    for i in range(0,len(Data['Date'])):
-        current_date=Data['Date'][i].astype('datetime64[D]')
-        iyear=current_date.astype('datetime64[Y]').astype(int) + 1970
-        imon=current_date.astype('datetime64[M]').astype(int) % 12 + 1
-        day=current_date-current_date.astype('datetime64[M]') +1
-        iday=day / np.timedelta64(1, 'D')
-        new_dates.append(cftime.datetime(iyear,imon,iday))
+def Save_decade(Data, Filename):
+    """Save a daily block, including only available variables and metadata."""
+    dates = np.asarray(Data['Date']).astype('datetime64[D]').astype('datetime64[ns]')
     ds = xr.Dataset(
-        data_vars={'Sim_Precipitation':(["simulation_time","station"], Data['tp_a'])},
-        coords={'simulation_time':new_dates,'station':list(range(0,len(Data['d2m'][:,0,0])))})
-    ds['hour']=range(0,24)
-    ds['latitude']=Data['Lat']
-    ds['longitude']=Data['Lon']
-    ds['Station_Mask']=(('latitude','longitude'),Data['Station_Mask'])
-    ds['Altitude']=(('latitude','longitude'),Data['Altitude'])
-    ds['simulation_t2m']=(('simulation_time','hour','station'),np.swapaxes(Data['t2m'],0,2))
-    ds['simulation_RH']=(('simulation_time','hour','station'),np.swapaxes(Data['RH'],0,2))
-    ds['simulation_d2m']=(('simulation_time','hour','station'),np.swapaxes(Data['d2m'],0,2))
-    ds.convert_calendar('standard',dim='simulation_time',use_cftime=True)
-    if os.path.isfile(Filename):
-        os.remove(Filename)
+        {'Sim_Precipitation': (('simulation_time', 'station'), Data['tp_a'])},
+        coords={'simulation_time': dates, 'station': np.arange(Data['tp_a'].shape[1]),
+                'hour': np.arange(24), 'latitude': Data['Lat'], 'longitude': Data['Lon']})
+    ds['Station_Mask'] = (('latitude', 'longitude'), Data['Station_Mask'])
+    for name in ('t2m', 'd2m', 'RH'):
+        if name in Data:
+            ds['simulation_' + name] = (
+                ('simulation_time', 'hour', 'station'), np.moveaxis(Data[name], 2, 0).transpose(0, 2, 1))
+    if 'Altitude' in Data:
+        ds['Altitude'] = (('latitude', 'longitude'), Data['Altitude'])
     ds.to_netcdf(Filename)
     ds.close()
-    gc.collect()
-    return
 
 
-def Model_run(Directory,Sim_num,Simulation_start_year,Simulation_end_year,
-              variable_list):
-    '''Central Function for running the program'''
-    #Controls the model run
-    Spin_up_days=1000
-    #Handle data loading
-    L_Directory=Directory+'Data/'
-    S_Directory=Directory+'Simulation/'
-    P_data=xr.open_dataset(L_Directory+'A_Omega_1950_2022.nc')
-    S_len=len(P_data['Station'])
-    in_data={}
-    for varname in variable_list:
-        in_data[varname]=Data_load(varname,L_Directory)
-    #XY Loading
-    H_XY=XY_load(variable_list,L_Directory)
-    Model_Params={'TP':P_data,'Var_data':in_data,'Var_list':variable_list,
-                  'H_XY':H_XY,'S_len':S_len}
-    #Initialization
-    Init_data=Simulation_Init(Model_Params,Spin_up_days)
-    Sim_Start_day=np.datetime64(str(Simulation_start_year)+'-01-01')
-    Sim_End_day=np.datetime64(str(Simulation_end_year)+'-01-01')
-    Altitude_file=L_Directory+'Altitude.nc'
-    Alt=xr.open_dataset(Altitude_file)
-    #Run through each simulation
-    print('Starting Simulation Iteration #'+str(Sim_num+1))
-    sim_dir=S_Directory+'Simulation_'+str(Sim_num+1)+'/'
-    if not os.path.isdir(sim_dir):
-        os.mkdir(sim_dir)
-    Current_date=Sim_Start_day.astype('datetime64[D]')
-    #Generate list of days to be simulated
-    Current_Vectors=Init_data
-    start_flag=True
-    var_exist_flag=False
-    #Need Save each decade out seperately
-    while Current_date!=Sim_End_day:
-        year=Current_date.astype('datetime64[Y]').astype(int)
-        day=Current_date-Current_date.astype('datetime64[Y]') +1
-        if np.mod(year,10)==0 and day==1:
-            if start_flag:
-                start_flag=False
-                start_str=str(Simulation_start_year)
-                start_day=Current_date.astype('datetime64[D]').astype(int)
-                end_day=(Current_date.astype('datetime64[Y]')+10).astype(
-                    'datetime64[D]').astype(int)
-                F_end_day=(Sim_End_day.astype('datetime64[Y]')).astype(
-                    'datetime64[D]').astype(int)
-                if F_end_day<end_day:
-                    end_day=F_end_day
-                day_len=end_day-start_day
-            else:
-                #Save data
-                end_str=str(year+1970)
-                filename=sim_dir+'Simulation_'+start_str+'_'+end_str+'.nc'
-                Full_data['Lat']=Model_Params['TP']['latitude'].values
-                Full_data['Lon']=Model_Params['TP']['longitude'].values
-                Full_data['Station_Mask']=Model_Params['TP']['Station_Mask'].values
-                Full_data['Altitude']=Alt['altitude'].values
-                RH=D2M_2_RH(Full_data)
-                Full_data['RH']=RH
-                print('Saving Sim#'+str(Sim_num+1)+ ' years '+start_str+' to '+end_str)
-                Save_decade(Full_data,filename)
-                var_exist_flag=False
-                start_str=end_str
-                start_day=Current_date.astype('datetime64[D]').astype(int)
-                end_day=(Current_date.astype('datetime64[Y]')+10).astype(
-                    'datetime64[D]').astype(int)
-                F_end_day=(Sim_End_day.astype('datetime64[Y]')).astype(
-                    'datetime64[D]').astype(int)
-                if F_end_day<end_day:
-                    end_day=F_end_day
-                day_len=end_day-start_day
-        #Simulate each day
-        Output_data,Current_Vectors=Full_Simulate_Day(Model_Params,Current_date,Current_Vectors)
-        if not var_exist_flag:
-            Full_data={}
-            Full_data['tp_o']=np.zeros([day_len,S_len])
-            Full_data['tp_a']=np.zeros([day_len,S_len])
-            Full_data['t2m']=np.zeros([S_len,24,day_len])
-            Full_data['d2m']=np.zeros([S_len,24,day_len])
-            Full_data['Date']=np.zeros([day_len])
-            var_exist_flag=True
-            Full_data['tp_o'][0,:]=Output_data['tp_o']
-            Full_data['tp_a'][0,:]=Output_data['tp_a']
-            Full_data['t2m'][:,:,0]=Output_data['t2m']
-            Full_data['d2m'][:,:,0]=Output_data['d2m']
-            Full_data['Date'][0]=np.array(Current_date)
-            count=0
-        else:
-            count+=1
-            Full_data['tp_o'][count,:]=Output_data['tp_o']
-            Full_data['tp_a'][count,:]=Output_data['tp_a']
-            Full_data['t2m'][:,:,count]=Output_data['t2m']
-            Full_data['d2m'][:,:,count]=Output_data['d2m']
-            Full_data['Date'][count]=np.array(Current_date)
-        Current_date=Current_date+np.timedelta64(1, 'D')
-    if var_exist_flag:
-        end_str=Current_date.astype('datetime64[Y]').astype(str)
-        filename=sim_dir+'Simulation_'+start_str+'_'+end_str+'.nc'
-        Full_data['Lat']=Model_Params['TP']['latitude'].values
-        Full_data['Lon']=Model_Params['TP']['longitude'].values
-        Full_data['Station_Mask']=Model_Params['TP']['Station_Mask'].values
-        Full_data['Altitude']=Alt['altitude'].values
-        RH=D2M_2_RH(Full_data)
-        Full_data['RH']=RH
-        Save_decade(Full_data,filename)
-    return
+def Model_run(Directory, Sim_num, Simulation_start_year, Simulation_end_year,
+              variable_list, start_year=1950, end_year=2022, spin_up_days=1000,
+              start_date=None, end_date=None, seed=None):
+    """Run any simulation interval, with a configurable historical training period."""
+    current = np.datetime64(start_date or f'{Simulation_start_year}-01-01', 'D')
+    end = np.datetime64(end_date or f'{Simulation_end_year}-01-01', 'D')
+    if np.isnat(current) or np.isnat(end) or end <= current:
+        raise ValueError('Simulation end must be later than simulation start (exclusive).')
+    data_dir = Directory + 'Data/'
+    sim_dir = Directory + 'Simulation/Simulation_' + str(Sim_num + 1) + '/'
+    os.makedirs(sim_dir, exist_ok=True)
+    with xr.open_dataset(data_dir + f'A_Omega_{start_year}_{end_year}.nc') as source:
+        rain = source.load()
+    hourly = {name: Data_load(name, data_dir, start_year, end_year) for name in variable_list}
+    xy = XY_load(variable_list, data_dir)
+    params = {'TP': rain, 'Var_data': hourly, 'Var_list': variable_list,
+              'H_XY': xy, 'S_len': rain.sizes['Station']}
+    params['rng'] = np.random.default_rng(seed)
+    params['occurrence_cholesky'] = [np.linalg.cholesky(rain['Brissette_Occurrence_Omega'].values[:, :, month]) for month in range(12)]
+    params['amount_cholesky'] = [np.linalg.cholesky(rain['Brissette_Amounts_Omega'].values[:, :, month]) for month in range(12)]
+    month = int(current.astype('datetime64[M]').astype(int) % 12)
+    state = Simulation_Init(params, spin_up_days, month=month)
+    altitude = None
+    if os.path.isfile(data_dir + 'Altitude.nc'):
+        with xr.open_dataset(data_dir + 'Altitude.nc') as source:
+            altitude = source['altitude'].values
+    while current < end:
+        year = int(current.astype('datetime64[Y]').astype(int)) + 1970
+        next_decade = np.datetime64(f'{(year // 10 + 1) * 10}-01-01', 'D')
+        stop = min(next_decade, end)
+        days = np.arange(current, stop, dtype='datetime64[D]')
+        count, stations = len(days), params['S_len']
+        block = {'Date': days, 'tp_a': np.empty((count, stations)),
+                 'Lat': rain['latitude'].values, 'Lon': rain['longitude'].values,
+                 'Station_Mask': rain['Station_Mask'].values}
+        block.update({name: np.empty((stations, 24, count)) for name in variable_list})
+        for index, day in enumerate(days):
+            output, state = Full_Simulate_Day(params, day, state)
+            block['tp_a'][index] = output['tp_a']
+            for name in variable_list:
+                block[name][:, :, index] = output[name]
+        if 'd2m' in variable_list:
+            block['RH'] = D2M_2_RH(block)
+        if altitude is not None:
+            block['Altitude'] = altitude
+        label = f'{year}_{str(stop)[:4]}' if str(current)[5:] == '01-01' and str(stop)[5:] == '01-01' else f'{current}_{stop}'
+        filename = f'{sim_dir}Simulation_{label}.nc'
+        Save_decade(block, filename)
+        print(f'Saved simulation {Sim_num + 1}: {current} to {stop}', flush=True)
+        current = stop
+    rain.close()
+    xy.close()
+    for dataset in hourly.values():
+        dataset.close()
 
 def Sim_Loader(Sim_Dir):
     '''Loads in an existing simulation output'''
-    files=os.listdir(Sim_Dir)
+    files=sorted(os.listdir(Sim_Dir))
     data_dict={}
     tmp_list=[]
     for filename in files:
         name=Sim_Dir+filename
-        if 'tmp' not in name:
+        if filename.endswith('.nc') and not filename.startswith('tmp_'):
             tmp_list.append(filename)
-            with xr.open_dataset(name,use_cftime=True,cache=True) as tmp_data:
-                data_dict[filename]=tmp_data
+            with xr.open_dataset(name,cache=True) as tmp_data:
+                data_dict[filename]=tmp_data.load()
                 tmp_data.close()
     return tmp_list, data_dict
 
 
-def Precipitation_Adjust(Base_S_dir,observation_dir,Sim_num):
+def Precipitation_Adjust(Base_S_dir,observation_dir,Sim_num,start_year=1950,end_year=2022):
     '''Adjust the precipitation amount simulation distribution'''
     from scipy.interpolate import CubicSpline
-    O_filename=observation_dir+'daily_tp_1950_2022.nc'
+    O_filename=observation_dir+f'daily_tp_{start_year}_{end_year}.nc'
     Obs_tp=xr.open_dataset(O_filename)
     t_obs_full_data=Obs_tp['tp'].values
     obs_full_data=t_obs_full_data[Obs_tp['Precipitation_mask'].values]
@@ -382,7 +293,11 @@ def Precipitation_Adjust(Base_S_dir,observation_dir,Sim_num):
         sim_full_data=tp[tp>1]
         #Calculate adjustment factors
         ipercent=list(range(0,101,5))
-        obs_percent=np.percentile(obs_full_data,ipercent)
+        simulated_months = np.unique(time.astype('datetime64[M]').astype(int) % 12)
+        observation_months = Obs_tp['time'].values.astype('datetime64[M]').astype(int) % 12
+        seasonal = np.isin(observation_months, simulated_months)
+        observed = t_obs_full_data[seasonal][Obs_tp['Precipitation_mask'].values[seasonal]]
+        obs_percent=np.percentile(observed,ipercent)
         sim_percent=np.percentile(sim_full_data,ipercent)
         diff_percent=sim_percent-obs_percent
         diff_spline=CubicSpline(sim_percent, diff_percent)
@@ -398,18 +313,22 @@ def Precipitation_Adjust(Base_S_dir,observation_dir,Sim_num):
                     alt_list.append(tmp_tp[int(np.where(gt_50)[0][alt]),s_ind]-diff_spline(50))
                 tmp_tp[nonzero_ind,s_ind]=tmp_tp[nonzero_ind,s_ind]-diff_spline(tmp_tp[nonzero_ind,s_ind])
                 tmp_tp[gt_50,s_ind]=alt_list
+            tmp_data.attrs['negative_precipitation_clipped'] = int(np.sum(tmp_tp < 0))
+            np.maximum(tmp_tp, 0, out=tmp_tp)
+            tmp_data.attrs['precipitation_adjustment'] = 'Upstream percentile correction with nonnegative rainfall support'
             S_Data[S_Filenames[j]].close()
             f_t_name=Sim_Dir+'tmp_'+S_Filenames[j]
             if os.path.isfile(f_t_name):
                 os.remove(f_t_name)
             tmp_data.to_netcdf(f_t_name)
             tmp_data.close()
+    Obs_tp.close()
     return
 
 
-def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num):
+def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num,start_year=1950,end_year=2022):
     '''Adjusts the diurnal cycle of temperature to match observations'''
-    O_filename=observation_dir+'Detrended_t2m_1950_2022.nc'
+    O_filename=observation_dir+f'Detrended_t2m_{start_year}_{end_year}.nc'
     Obs_t2m=xr.open_dataset(O_filename,decode_timedelta=False)
     Obs_full_data=Obs_t2m['t2m'].values
     Obs_time=Obs_t2m['time'].values
@@ -437,6 +356,8 @@ def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num):
         lat_len=len(Obs_full_data[0,0,:,0])
         lon_len=len(Obs_full_data[0,0,0,:])
         for i in range(0,12):
+            if not np.any(sim_mon == i):
+                continue
             Obs_mon_mean=np.nanmean(Obs_full_data[Obs_mon==i,:,:,:])
             Sim_mon_mean=np.nanmean(t2m[sim_mon==i,:,:])
             for z in range(0,24):
@@ -456,7 +377,7 @@ def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num):
             tmp_t2m=tmp_data['simulation_t2m'].values
             tmp_time=tmp_data['simulation_time'].values   
             for time_ind in range(0,len(tmp_time)):
-                tmp_mon=tmp_time[time_ind].month-1
+                tmp_mon=int(tmp_time[time_ind].astype('datetime64[M]').astype(int) % 12)
                 for i_hour in range(0,24):
                     tmp_t2m[time_ind,i_hour,:]+=Adj_vectors[tmp_mon,i_hour]
             S_Data[S_Filenames[j]].close()
@@ -465,23 +386,19 @@ def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num):
                 os.remove(f_t_name)
             tmp_data.to_netcdf(f_t_name)
             tmp_data.close()
+    Obs_t2m.close()
     return
 
-def Sim_replace(Base_S_dir,Sim_num):
-    '''Overwrite the original simulation files with
-    the temporary simulation files'''
-    for i in range(0,Sim_num):
-        Sim_Dir=Base_S_dir+'Simulation/Simulation_'+str(i+1)+'/'
-        list_dir=os.listdir(Sim_Dir)
-        for iname in list_dir:
-            if 'tmp' not in iname:
-                os.remove(Sim_Dir+iname)
-                tmp_f_name=Sim_Dir+'tmp_'+iname
-                ds=xr.open_dataset(tmp_f_name)
-                ds.to_netcdf(Sim_Dir+iname)
-                ds.close()
-                os.remove(tmp_f_name)
-    return
+def Sim_replace(Base_S_dir, Sim_num):
+    """Atomically replace generated files after a completed adjustment."""
+    for index in range(Sim_num):
+        directory = Base_S_dir + f'Simulation/Simulation_{index + 1}/'
+        for filename in sorted(os.listdir(directory)):
+            if filename.endswith('.nc') and not filename.startswith('tmp_'):
+                temporary = directory + 'tmp_' + filename
+                if not os.path.isfile(temporary):
+                    raise FileNotFoundError(f'Adjusted output is missing: {temporary}')
+                os.replace(temporary, directory + filename)
 
 
 def metadata_handling(Base_F_dir,Sim_number):
@@ -493,163 +410,88 @@ def metadata_handling(Base_F_dir,Sim_number):
     return
 
 
-def adjust_metadata(Base_S_dir,Sim_num):
-    '''Transforms the time vector to joint time/day'''
-    for i in range(0,Sim_num):
-        Sim_Dir=Base_S_dir+'Simulation/Simulation_'+str(i+1)+'/'
-        S_Filenames,S_Data=Sim_Loader(Sim_Dir)
-        for z in range(0,len(S_Filenames)):
-            data=S_Data[S_Filenames[z]]
-            #extract data
-            tmp_time=data['simulation_time'].values
-            tmp_tp=data['Sim_Precipitation'].values
-            tmp_alt=data['Altitude'].values
-            tmp_t2m=data['simulation_t2m'].values
-            tmp_RH=data['simulation_RH'].values
-            tmp_d2m=data['simulation_d2m'].values
-            #adjust dates to vector
-            joint_time=[]
-            new_dates=[]
-            for sim_day in tmp_time:
-                for sim_hour in range(0,24):
-                    tmp_time_val=np.datetime64(sim_day)+np.timedelta64(sim_hour,'h')
-                    joint_time.append(tmp_time_val)
-            for idat in range(0,len(joint_time)):
-                current_date=joint_time[idat].astype('datetime64[h]')
-                iyear=current_date.astype('datetime64[Y]').astype(int) + 1970
-                imon=current_date.astype('datetime64[M]').astype(int) % 12 + 1
-                day=current_date.astype('datetime64[D]')-current_date.astype('datetime64[M]') +1
-                iday=day / np.timedelta64(1, 'D')
-                hour=current_date-current_date.astype('datetime64[D]')
-                ihour=hour.astype(int)
-                new_dates.append(cftime.datetime(iyear,imon,iday,ihour))
-            #reorder the data
-            tmp_st=data['station'].values
-            #Restructure the variables
-            n_tmp_t2m=np.zeros([len(new_dates),len(tmp_st)])
-            n_tmp_RH=np.zeros([len(new_dates),len(tmp_st)])
-            n_tmp_d2m=np.zeros([len(new_dates),len(tmp_st)])
-            for xval in range(0,len(tmp_time)):
-                for yval in range(0,24):
-                    n_tmp_t2m[xval*24+yval,:]=tmp_t2m[xval,yval,:]
-                    n_tmp_RH[xval*24+yval,:]=tmp_RH[xval,yval,:]
-                    n_tmp_d2m[xval*24+yval,:]=tmp_d2m[xval,yval,:]
-            #Adjust station structure to lat lon structure
-            Lat=data['latitude']
-            Lon=data['longitude']
-            Station_len=int(np.nanmax(data['Station_Mask'])+1)
-            Station_Mask=data['Station_Mask']
-            var_list=['tp_a','t2m','d2m','RH']
-            var_output={}
-            for var_name in var_list:
-                if var_name=='tp_a':
-                    tmp_grid_in=tmp_tp
-                elif var_name=='t2m':
-                    tmp_grid_in=n_tmp_t2m
-                elif var_name=='d2m':
-                    tmp_grid_in=n_tmp_d2m
-                elif var_name=='RH':
-                    tmp_grid_in=n_tmp_RH
-                tmp_grid_out=np.ones([len(tmp_grid_in[:,0]),len(Lat),len(Lon)])*np.nan
-                for ilat in range(0,len(Lat)):
-                    for ilon in range(0,len(Lon)):
-                        if not(np.isnan(Station_Mask[ilat,ilon])):
-                            tmp_grid_out[:,ilat,ilon]=tmp_grid_in[:,int(Station_Mask[ilat,ilon].values)]
-                var_output[var_name]=tmp_grid_out
-            #Save the dataset to the disk
+def adjust_metadata(Base_S_dir, Sim_num):
+    """Expand available station variables to their geographic grid."""
+    for index in range(Sim_num):
+        directory = Base_S_dir + f'Simulation/Simulation_{index + 1}/'
+        filenames, datasets = Sim_Loader(directory)
+        for filename in filenames:
+            data = datasets[filename]
+            dates = np.asarray(data['simulation_time'].values, dtype='datetime64[ns]')
+            hours = (dates[:, None] + np.arange(24)[None, :] * np.timedelta64(1, 'h')).ravel()
+            mask = data['Station_Mask'].values
+            valid = np.isfinite(mask)
+            station = mask[valid].astype(int)
+
+            def grid(values):
+                output = np.full((len(values), *mask.shape), np.nan)
+                output[:, valid] = values[:, station]
+                return output
+
             ds = xr.Dataset(
-                data_vars={'simulation_Precipitation':(["simulation_day","latitude",'longitude'], var_output['tp_a'])},
-            coords={'simulation_day':tmp_time,'latitude':data['latitude'],'longitude':data['longitude']})
-            ds['simulation_time']=new_dates
-            ds['Altitude']=(('latitude','longitude'),tmp_alt)
-            ds['simulation_t2m']=(('simulation_time','latitude','longitude'),var_output['t2m'])
-            ds['simulation_RH']=(('simulation_time','latitude','longitude'),var_output['RH'])
-            ds['simulation_d2m']=(('simulation_time','latitude','longitude'),var_output['d2m'])
-            Filename=Sim_Dir+'tmp_'+S_Filenames[z]
-            if os.path.isfile(Filename):
-                os.remove(Filename)
-            ds.to_netcdf(Filename)
+                {'simulation_Precipitation': (('simulation_day', 'latitude', 'longitude'),
+                                             grid(data['Sim_Precipitation'].values))},
+                coords={'simulation_day': dates, 'simulation_time': hours,
+                        'latitude': data['latitude'], 'longitude': data['longitude']}, attrs=data.attrs)
+            for name in ('t2m', 'd2m', 'RH'):
+                key = 'simulation_' + name
+                if key in data:
+                    values = data[key].values.reshape(len(hours), data.sizes['station'])
+                    ds[key] = (('simulation_time', 'latitude', 'longitude'), grid(values))
+            if 'Altitude' in data:
+                ds['Altitude'] = data['Altitude']
+            ds.to_netcdf(directory + 'tmp_' + filename)
             ds.close()
-            gc.collect()
-    return
-
-def add_alt_metadata(Base_S_dir,Sim_num):
-    '''Adds the metadata to simulation output'''
-    for i in range(0,Sim_num):
-        Sim_Dir=Base_S_dir+'Simulation/Simulation_'+str(i+1)+'/'
-        S_Filenames,S_Data=Sim_Loader(Sim_Dir)
-        for z in range(0,len(S_Filenames)):
-            data=S_Data[S_Filenames[z]]
-            data['simulation_Precipitation']=data['simulation_Precipitation'].assign_attrs(
-                units="mm",full_name='Simulated daily precipitation',
-                description="9 am to 9 am simulation bounds following GHCN conventions")
-            data['Altitude']=data['Altitude'].assign_attrs(
-                units="m",full_name='Altitude Grid')
-            data['simulation_t2m']=data['simulation_t2m'].assign_attrs(
-                units="k",full_name='Simulated 2m air temperature',
-                description="Can adjust to degrees Celsius by subtracting 273.15. This corresponds to an instantaneous measurement matching the time step.")
-            data['simulation_d2m']=data['simulation_d2m'].assign_attrs(
-                units="k",full_name='Simulated 2m dew point temperature',
-                description="Can adjust to degrees Celsius by subtracting 273.15. This corresponds to an instantaneous measurement matching the time step.")
-            data['simulation_RH']=data['simulation_RH'].assign_attrs(
-                units="%",full_name='Simulated Relative Humidity',
-                description="Estimated using t2m and d2m. This corresponds to an instantaneous measurement matching the time step.")
-            data['latitude']=data['latitude'].assign_attrs(units="degrees")
-            data['longitude']=data['longitude'].assign_attrs(units="degrees")
-            data['simulation_time']=data['simulation_time'].assign_attrs(full_name='Simulated hour of the given day in UTC')
-            if os.path.isfile(Sim_Dir+'tmp_'+S_Filenames[z]):
-                os.remove(Sim_Dir+'tmp_'+S_Filenames[z])
-            data.to_netcdf(Sim_Dir+'tmp_'+S_Filenames[z])
-    return
-
-def Nonstationairy_mode(Base_S_dir,observation_dir,Sim_num):
-    '''Reintroduces the model forcing associated with time evolution'''
-    def Line_based_correction(in_fit, in_data, in_d,dind_2020,maxd):
-        '''make adjustments to the data based on the trend line'''
-        in_d_index=in_d>maxd
-        in_d[in_d_index]=max_d
-        in_d_index=in_d<0
-        in_d[in_d_index]=0
-        line_vals = in_fit[0] + in_fit[1] * in_d
-        ind_vals = in_fit[0] + in_fit[1] * dind_2020
-        adjust_vals = ind_vals-line_vals
-        out_data = in_data - adjust_vals
-        return out_data
-    #Load in observational trending data
-    O_t2m_filename=observation_dir+'Detrended_t2m_1950_2022.nc'
-    Obs_t2m=xr.open_dataset(O_t2m_filename,decode_timedelta=False)
-    Obs_time=Obs_t2m['time'].values
-    t2m_co=Obs_t2m['Detrend Coefficients'].values
-    O_d2m_filename=observation_dir+'Detrended_d2m_1950_2022.nc'
-    Obs_d2m=xr.open_dataset(O_d2m_filename,decode_timedelta=False)
-    d2m_co=Obs_d2m['Detrend Coefficients'].values
-    ind_2020=np.argwhere(Obs_time==np.datetime64('2020-01-01'))[0][0]
-    #iterate through simulations
-    for i in range(0,Sim_num):
-        Sim_Dir=Base_S_dir+'Simulation/Simulation_'+str(i+1)+'/'
-        S_Filenames,S_Data=Sim_Loader(Sim_Dir)
-        for z in range(0,len(S_Filenames)):
-            data=S_Data[S_Filenames[z]]
-            #extract data
-            tmp_time=data['simulation_time'].values
-            tmp_t2m=data['simulation_t2m'].values
-            tmp_d2m=data['simulation_d2m'].values
-            d_values=tmp_time.astype('datetime64[D]').astype(int)-np.min(Obs_time.astype('datetime64[D]').astype(int))
-            max_d=np.max(Obs_time.astype('datetime64[D]').astype(int))-np.min(Obs_time.astype('datetime64[D]').astype(int))
-            new_t2m=np.ones(np.shape(tmp_t2m))*np.nan
-            new_d2m=np.ones(np.shape(tmp_t2m))*np.nan
-            for station in range(0,len(tmp_t2m[0,0,:])):
-                for hour in range(0,24):
-                    new_t2m[:,hour,station]=Line_based_correction(t2m_co, tmp_t2m[:,hour,station], d_values,ind_2020,max_d)
-                    new_d2m[:,hour,station]=Line_based_correction(d2m_co, tmp_d2m[:,hour,station], d_values,ind_2020,max_d)
-            tmp_data=data.copy(deep='True')
-            tmp_data['simulation_t2m'].values=new_t2m
-            tmp_data['simulation_d2m'].values=new_d2m
-              
-            f_t_name=Sim_Dir+'tmp_'+S_Filenames[z]            
-            if os.path.isfile(f_t_name):
-                os.remove(f_t_name)
-            tmp_data.to_netcdf(f_t_name)
-            tmp_data.close()
             data.close()
-    return
+
+def add_alt_metadata(Base_S_dir, Sim_num):
+    """Add units only to variables actually generated."""
+    attributes = {
+        'simulation_Precipitation': {'units': 'mm', 'long_name': 'Simulated daily precipitation'},
+        'simulation_t2m': {'units': 'K', 'long_name': 'Simulated 2m air temperature'},
+        'simulation_d2m': {'units': 'K', 'long_name': 'Simulated 2m dewpoint temperature'},
+        'simulation_RH': {'units': '%', 'long_name': 'Simulated relative humidity'},
+        'Altitude': {'units': 'm', 'long_name': 'Altitude'},
+        'latitude': {'units': 'degrees_north'}, 'longitude': {'units': 'degrees_east'},
+    }
+    for index in range(Sim_num):
+        directory = Base_S_dir + f'Simulation/Simulation_{index + 1}/'
+        filenames, datasets = Sim_Loader(directory)
+        for filename in filenames:
+            data = datasets[filename]
+            for name, attrs in attributes.items():
+                if name in data:
+                    data[name].attrs.update(attrs)
+            data.to_netcdf(directory + 'tmp_' + filename)
+            data.close()
+
+def Nonstationairy_mode(Base_S_dir, observation_dir, Sim_num, start_year=1950, end_year=2022):
+    """Restore fitted temperature trends, clamped to the historical interval."""
+    trends = {}
+    for name in ('t2m', 'd2m'):
+        path = observation_dir + f'Detrended_{name}_{start_year}_{end_year}.nc'
+        if os.path.isfile(path):
+            with xr.open_dataset(path, decode_timedelta=False) as source:
+                dates = source['time'].values.astype('datetime64[D]')
+                offset = (dates - dates[0]).astype(int)
+                pivot = int(source['Detrend Pivot'].values)
+                trends[name] = (dates[0], int(offset[-1]), int(offset[pivot]),
+                                float(source['Detrend Coefficients'].values[1]))
+    for index in range(Sim_num):
+        directory = Base_S_dir + f'Simulation/Simulation_{index + 1}/'
+        filenames, datasets = Sim_Loader(directory)
+        for filename in filenames:
+            data = datasets[filename]
+            for name, (origin, maximum, pivot, slope) in trends.items():
+                key = 'simulation_' + name
+                if key in data:
+                    elapsed = (data['simulation_time'].values.astype('datetime64[D]') - origin).astype(int)
+                    adjustment = slope * (np.clip(elapsed, 0, maximum) - pivot)
+                    data[key] = data[key] + xr.DataArray(adjustment, dims='simulation_time')
+            if 'simulation_d2m' in data:
+                data['simulation_RH'] = (100 * model_rh(data)).clip(max=100)
+            data.to_netcdf(directory + 'tmp_' + filename)
+            data.close()
+
+def model_rh(data):
+    return RH_Calculate(data['simulation_d2m'], data['simulation_t2m'])

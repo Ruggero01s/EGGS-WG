@@ -3,12 +3,12 @@
 #pylint:disable=invalid-name
 #pylint:disable=import-outside-toplevel
 
-def Data_Extract(L_Directory,S_Directory,Lats,Lons):
+def Data_Extract(L_Directory,S_Directory,Lats,Lons,start_year=1950,end_year=2022):
     '''Converts an on disk monthly grib file into a variable netcdf file'''
     import xarray as xr
     import os
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     Lat_max=Lats[0]
     Lat_min=Lats[1]
     Lon_max=Lons[0]
@@ -33,12 +33,12 @@ def Data_Extract(L_Directory,S_Directory,Lats,Lons):
                 print(Savename+' Processed')
     return
 
-def Variable_Extract(variable_str,L_Directory,S_Directory,Lats,Lons):
+def Variable_Extract(variable_str,L_Directory,S_Directory,Lats,Lons,start_year=1950,end_year=2022):
     '''Converts an on disk monthly grib file into a variable netcdf file'''
     import numpy as np
     import xarray as xr
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     Lat_max=Lats[0]
     Lat_min=Lats[1]
     Lon_max=Lons[0]
@@ -116,14 +116,14 @@ def Line_based_correction(in_fit, in_data, in_d,ind):
     out_data = in_data + adjust_vals
     return out_data
 
-def Variable_Detrender(var,directory):
+def Variable_Detrender(var,directory,start_year=1950,end_year=2022,reference_year=None):
     '''Full detrending process'''
     #Removes the trend over the observational time peiod 
     import xarray as xr
     import numpy as np
     import os
     #Load in the regular data
-    init_name=directory+var+'_1950_2022.nc'
+    init_name=directory+var+'_'+str(start_year)+'_'+str(end_year)+'.nc'
     var_name=var
     time_name='time'
     t_axis=(1,2,3)
@@ -135,7 +135,9 @@ def Variable_Detrender(var,directory):
     regional_mean=np.nanmean(tmp_data,axis=t_axis)
     tmp_fit_coeff = detrend_curve_fit(regional_mean, d_values)
     #Next do the retroactive adjustments based on the linear fit
-    ind_2020=np.argwhere(time==np.datetime64('2020-01-01'))[0][0]
+    reference_year = min(2020, end_year) if reference_year is None else reference_year
+    reference = np.datetime64(f'{reference_year}-01-01')
+    ind_2020 = int(np.argmin(np.abs(time - reference)))
     #Adj_value=Line_based_correction(tmp_fit_coeff, regional_mean, d_values,ind_2020)
     #Apply fit to data
     tmp_val=np.ones(np.shape(tmp_data))*np.nan
@@ -147,21 +149,22 @@ def Variable_Detrender(var,directory):
     ds[var_name]=(('time', 'step', 'latitude', 'longitude'),tmp_val)
     ds['Detrend Coefficients']=tmp_fit_coeff
     ds['Detrend Pivot']=ind_2020
+    ds.attrs['detrend_reference_date'] = str(time[ind_2020].astype('datetime64[D]'))
     #Output the data to disk
-    Save_name=directory+'Detrended_'+var+'_1950_2022.nc'
+    Save_name=directory+'Detrended_'+var+'_'+str(start_year)+'_'+str(end_year)+'.nc'
     if os.path.isfile(Save_name):
         os.remove(Save_name)
     ds.to_netcdf(Save_name)
     return
 
 
-def Daily_Precipitation_Extract(Directory):
+def Daily_Precipitation_Extract(Directory,start_year=1950,end_year=2022):
     '''Transform the hourly precipitation data into daily output'''
     import xarray as xr
     import numpy as np
     #Takes the raw downloaded ERA5 files and then processes them into a managable form
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     loadname=Directory+'tp_' +str(Year_start)+'_'+str(Year_end)+'.nc'
     tp=xr.open_dataset(loadname,decode_timedelta=False)
     new_tp=tp.copy(deep=True)
@@ -188,13 +191,13 @@ def Daily_Precipitation_Extract(Directory):
     daily_pr.to_netcdf(Savename)
     return
 
-def Markov_Calculation(Directory):
+def Markov_Calculation(Directory,start_year=1950,end_year=2022):
     '''Calculating the probabilities of a tranisition in daily precip state'''
     import xarray as xr
     import numpy as np
     import os
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     loadname=Directory+'daily_tp_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     tp=xr.open_dataset(loadname)
     #Just count instances and then can divide by sum to get the probabilities
@@ -206,6 +209,8 @@ def Markov_Calculation(Directory):
             sub_data=tp['Precipitation_mask'].isel(latitude=j,longitude=i).values
             date_data=tp['time'].values
             for k in range(2,len(sub_data)):
+                if date_data[k] - date_data[k-2] != np.timedelta64(2, 'D'):
+                    continue
                 ind=2*sub_data[k-2]+sub_data[k-1]
                 mon_ind=date_data[k].astype('datetime64[M]').astype(int) % 12
                 total_counts[j,i,mon_ind,ind]+=1
@@ -232,7 +237,7 @@ def Markov_Calculation(Directory):
     tp.to_netcdf(Savename)
     return
 
-def Cross_Correlator(Directory):
+def Cross_Correlator(Directory,start_year=1950,end_year=2022):
     '''Calculates cross correlations and generates matricies necessary for the simulation'''
     import xarray as xr
     import numpy as np
@@ -246,8 +251,8 @@ def Cross_Correlator(Directory):
         ssB = (B_mB**2).sum(1)
         # Finally get corr coeff
         return np.dot(A_mA, B_mB.T) / np.sqrt(np.dot(ssA[:, None],ssB[None]))
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     loadname=Directory+'Markov_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     tp=xr.open_dataset(loadname,decode_timedelta=False)
     #First calculate all of the sequence cross-correlations
@@ -355,15 +360,15 @@ def Alt_Pos_Def(input_matrix):
     New_Omega=np.matmul(Eig_mat,np.matmul(Lambda_matrix,Eig_mat_I))
     return New_Omega
 
-def Amounts_Coeff(Directory):
+def Amounts_Coeff(Directory,start_year=1950,end_year=2022):
     '''Calculate the distribution coefficeints for precipitation'''
     import xarray as xr
     import numpy as np
     import os
     from scipy import optimize
 
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
 
     loadname=Directory+'daily_tp_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     tp=xr.open_dataset(loadname)
@@ -429,13 +434,13 @@ def Amounts_Coeff(Directory):
     tp.to_netcdf(Savename)
     return
 
-def Amounts_Corr(Directory):
+def Amounts_Corr(Directory,start_year=1950,end_year=2022):
     '''Calculate the correlations required in precipitation amount'''
     import xarray as xr
     import numpy as np
     import os
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     loadname=Directory+'Markov_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     tp=xr.open_dataset(loadname)
     #First calculate all of the sequence cross-correlations
@@ -515,6 +520,8 @@ def Amounts_Corr(Directory):
 def Omega_Mon(P0,P1,C_X_Obs,C_R_0,imonth):
     '''Parallised Omega matrix month calculation'''
     import numpy as np
+    if len(P0) == 1:
+        return np.eye(1)
     import time
     print('Calculating month:'+str(imonth))
     def Simulate_Day(V_1,prob_vector,Omega):
@@ -535,7 +542,7 @@ def Omega_Mon(P0,P1,C_X_Obs,C_R_0,imonth):
         for i in range(0,Spin_up_Iterations):
             prob_vector=np.squeeze(I_P0*[abs(simulation_vector-1)] + I_P1*simulation_vector)
             Update_vector=Simulate_Day(simulation_vector,prob_vector,I_Omega)
-            simulation_vector=np.squeeze(Update_vector*1)
+            simulation_vector=np.atleast_1d(Update_vector*1)
             Output_List.append(simulation_vector)
         return Output_List
 
@@ -606,7 +613,7 @@ def Omega_Mon(P0,P1,C_X_Obs,C_R_0,imonth):
                 old_diff=Diff_mean
     return C_R_0
 
-def O_Omega(Directory):
+def O_Omega(Directory,start_year=1950,end_year=2022,workers=None,seed=None):
     '''Calculates the correlations required in occurence simulation'''
     import numpy as np
     import xarray as xr
@@ -616,8 +623,8 @@ def O_Omega(Directory):
     import multiprocessing 
   
     #Recreate the Brissette approach for building the omega matrix
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
     Corr_Obs_name=Directory+'Corr_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     CORR=xr.open_dataset(Corr_Obs_name)
     Station_mask=CORR['Station_Mask'].values
@@ -638,18 +645,15 @@ def O_Omega(Directory):
         C_R_0_v=CORR['correlation_matrix'].values[:,:,imonth]
         p.append((P0_v,P1_v,C_X_Obs_v,C_R_0_v,imonth))
     ##### Multithreading Code
-    if multiprocessing.cpu_count()>=24:
-        with multiprocessing.Pool(processes=12) as pool:
-            r = pool.starmap(Omega_Mon,p)  # Parallel execution
-    elif multiprocessing.cpu_count()>=12:
-        with multiprocessing.Pool(processes=8) as pool:
-            r = pool.starmap(Omega_Mon,p)  # Parallel execution
-    elif multiprocessing.cpu_count()>=4:
-        with multiprocessing.Pool(processes=4) as pool:
-            r = pool.starmap(Omega_Mon,p)  # Parallel execution
+    from ai4water_eggs.parallel import parallel_map
+    calibration_report = []
+    if seed is None:
+        r = parallel_map(Omega_Mon, p, workers)
     else:
-        with multiprocessing.Pool(processes=1) as pool:
-            r = pool.starmap(Omega_Mon,p)  # Parallel execution
+        from ai4water_eggs.spatial import calibrate_occurrence
+        calibrated = parallel_map(calibrate_occurrence, [task + (seed,) for task in p], workers)
+        r = [item[0] for item in calibrated]
+        calibration_report = [item[1] for item in calibrated]
     
     for i in range(0,12):
         Full_C_R[:,:,i]=r[i]
@@ -664,6 +668,8 @@ def O_Omega(Directory):
     ds['P0_vector']= (('Station','Months'),P0_vector)
     ds['P1_vector']= (('Station','Months'),P1_vector)
     ds['Station_Mask']=(('latitude','longitude'),Station_mask)
+    import json
+    ds.attrs['calibration_report'] = json.dumps(calibration_report)
     Omega_Savename=Directory+'O_Omega_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     if os.path.isfile(Omega_Savename):
         os.remove(Omega_Savename)
@@ -673,6 +679,8 @@ def O_Omega(Directory):
 def A_Omega_Mon(P0,P1,C_X_Obs,C_R_0,Tmp_B_Omega,Full_Coeff,imonth):
     '''Parallised Omega matrix month calculation'''
     import numpy as np
+    if len(P0) == 1:
+        return np.eye(1)
     import time
     from scipy.special import erf
     def Simulate_Day_Occur(V_1,prob_vector,Omega):
@@ -717,7 +725,7 @@ def A_Omega_Mon(P0,P1,C_X_Obs,C_R_0,Tmp_B_Omega,Full_Coeff,imonth):
         for iters in range(0,Spin_up_Iterations):
             prob_vector=np.squeeze(I_P0*[abs(simulation_vector-1)] + I_P1*simulation_vector)
             [Update_vector,RNG]=Simulate_Day_Occur(simulation_vector,prob_vector,Omega)
-            simulation_vector=np.squeeze(Update_vector*1)
+            simulation_vector=np.atleast_1d(Update_vector*1)
             Occurrence_List.append(simulation_vector)
             #Now simulate occurence
             Update_vector2=Simulate_Day_Amount(
@@ -796,7 +804,7 @@ def A_Omega_Mon(P0,P1,C_X_Obs,C_R_0,Tmp_B_Omega,Full_Coeff,imonth):
     return C_R_0
  
 
-def A_Omega(Directory):
+def A_Omega(Directory,start_year=1950,end_year=2022,workers=None,seed=None):
     '''Calculates the correlations required in amount simulation'''
     import numpy as np
     import xarray as xr
@@ -806,8 +814,8 @@ def A_Omega(Directory):
     import time
     import multiprocessing
     #recreate the Brissette approach for building the omega matrix
-    Year_start=1950
-    Year_end=2022
+    Year_start=start_year
+    Year_end=end_year
 
     
     Corr_Obs_name=Directory+'Amounts_Corr_'+str(Year_start)+'_'+str(Year_end)+'.nc'
@@ -832,15 +840,15 @@ def A_Omega(Directory):
         Full_Coeff_v=[Alpha_1[:,imonth],Beta_1[:,imonth],Beta_2[:,imonth]]
         p.append((P0_v,P1_v,C_X_Obs_v,C_R_0_v,B_Omega_v,Full_Coeff_v,imonth))
     ##### Multithreading Code
-    if multiprocessing.cpu_count()>=12:
-        with multiprocessing.Pool(processes=12) as pool:
-            r = pool.starmap(A_Omega_Mon,p)  # Parallel execution
-    elif multiprocessing.cpu_count()>=4:
-        with multiprocessing.Pool(processes=4) as pool:
-            r = pool.starmap(A_Omega_Mon,p)  # Parallel execution
+    from ai4water_eggs.parallel import parallel_map
+    calibration_report = []
+    if seed is None:
+        r = parallel_map(A_Omega_Mon, p, workers)
     else:
-        with multiprocessing.Pool(processes=1) as pool:
-            r = pool.starmap(A_Omega_Mon,p)  # Parallel execution
+        from ai4water_eggs.spatial import calibrate_amounts
+        calibrated = parallel_map(calibrate_amounts, [task + (seed,) for task in p], workers)
+        r = [item[0] for item in calibrated]
+        calibration_report = [item[1] for item in calibrated]
     
     for i in range(0,12):
         Full_C_R[:,:,i]=r[i]
@@ -860,6 +868,8 @@ def A_Omega(Directory):
     ds['P0_Vector']=(('Station', 'Months'),B_Omega_dataset['P0_vector'].values)
     ds['P1_Vector']=(('Station', 'Months'),B_Omega_dataset['P1_vector'].values)
 
+    import json
+    ds.attrs['calibration_report'] = json.dumps(calibration_report)
     Omega_Savename=Directory+'A_Omega_'+str(Year_start)+'_'+str(Year_end)+'.nc'
     if os.path.isfile(Omega_Savename):
         os.remove(Omega_Savename)
@@ -867,180 +877,23 @@ def A_Omega(Directory):
     return
 
 def Fourier_Hour_Parallel(in_var_data,in_var_std,in_full_day_vector,station_num,Station_max):
-    import numpy as np
-    '''Parallelised form of the hourly fourier calculation'''
-    def Alpha_Beta_calculation_Mean_day(T_vector,n_value,Time_vec):
-        coeff=2/8760
-        theta=2*np.pi*n_value/8760
-        Alpha_value=0
-        Beta_value=0
-        #Need to sum over time steps
-        for i_day in range(1,366):
-            day_ind=np.equal(Time_vec,i_day)
-            for i_step in range(0,24):
-                t_ind=i_step+(i_day-1)*24+1
-                T_mean=np.nanmean(T_vector[day_ind,i_step])
-                Alpha_value+=T_mean*np.cos(theta*t_ind)
-                Beta_value+=T_mean*np.sin(theta*t_ind)
-        Alpha_value=Alpha_value*coeff
-        Beta_value=Beta_value*coeff
-        return Alpha_value,Beta_value
-    def Alpha_Beta_calculation_STD_day(T_vector,n_value,Time_vec):
-        coeff=2/8760
-        theta=2*np.pi*n_value/8760
-        Alpha_value=0
-        Beta_value=0
-        #Need to sum over time steps
-        for i_day in range(1,366):
-            day_ind=np.equal(Time_vec,i_day)
-            for i_step in range(0,24):
-                t_ind=i_step+(i_day-1)*24+1
-                T_mean=np.nanstd(T_vector[day_ind,i_step])
-                Alpha_value+=T_mean*np.cos(theta*t_ind)
-                Beta_value+=T_mean*np.sin(theta*t_ind)
-        Alpha_value=Alpha_value*coeff
-        Beta_value=Beta_value*coeff
-        return Alpha_value,Beta_value
-    Step_len=len(in_var_data[0,:])
-    
-    n_values=[1,365,730,1095,1460,2190]
-    Fourier_mean_v=np.zeros([Step_len*365])
-    Fourier_std_v=np.zeros([Step_len*365])
-    print('Calculating Fourier Hours:'+str(station_num)+'/'+str(Station_max))
-    
-    tmp_data=in_var_data[:,:]
-    mean_T=np.nanmean(tmp_data)
-    std_T=np.mean(in_var_std[:,:])
-    Alpha_mean_values=[]
-    Beta_mean_values=[]
-    Alpha_std_values=[]
-    Beta_std_values=[]
-    for n in n_values:
-        [Alpha,Beta]=Alpha_Beta_calculation_Mean_day(tmp_data,n,in_full_day_vector)
-        Alpha_mean_values.append(Alpha)
-        Beta_mean_values.append(Beta)
-        [Alpha_std,Beta_std]=Alpha_Beta_calculation_STD_day(tmp_data,n,in_full_day_vector)
-        Alpha_std_values.append(Alpha_std)
-        Beta_std_values.append(Beta_std)
-    for j in range(0,Step_len*365):
-        val=0
-        std_val=0
-        count=0
-        for n in n_values:
-            t=j+1
-            val+=Alpha_mean_values[count]*np.cos(
-                2*np.pi*n*t/8760)+Beta_mean_values[count]*np.sin(2*np.pi*n*t/8760)
-            std_val+=Alpha_std_values[count]*np.cos(
-                2*np.pi*n*t/8760)+Beta_std_values[count]*np.sin(2*np.pi*n*t/8760)
-            count+=1
-        Fourier_mean_v[j]=mean_T + val
-        Fourier_std_v[j]=std_T + std_val
-    return station_num,Fourier_mean_v,Fourier_std_v
+    from ai4water_eggs.seasonal import fit_hourly
+    return fit_hourly(in_var_data, in_var_std, in_full_day_vector, station_num, Station_max)
 
 
 def Fourier_Day_Parallel(in_var_data,in_var_P,in_D_std,in_W_std,in_full_day_vector,station_num,Station_max):
-    import numpy as np
-    '''Parallelised form of the daily fourier calculation'''
-    n_values=[1,2,3,4,6]
-    def Alpha_Beta_calculation_Mean(T_vector,n_value,Time_vec):
-        coeff=2/365
-        theta=2*np.pi*n_value/365
-        Alpha_value=0
-        Beta_value=0
-        #Need to sum over time steps
-        for i_day in range(1,366):
-            day_ind=np.equal(Time_vec,i_day)
-            T_mean=np.nanmean(T_vector[day_ind,:])
-            Alpha_value+=T_mean*np.cos(theta*i_day)
-            Beta_value+=T_mean*np.sin(theta*i_day)
-        Alpha_value=Alpha_value*coeff
-        Beta_value=Beta_value*coeff
-        return Alpha_value,Beta_value
-    def Alpha_Beta_calculation_STD(T_vector,n_value,Time_vec):
-        coeff=2/365
-        theta=2*np.pi*n_value/365
-        Alpha_value=0
-        Beta_value=0
-        #Need to sum over time steps
-        for i_day in range(1,366):
-            day_ind=np.equal(Time_vec,i_day)
-            T_mean=np.nanstd(T_vector[day_ind,:])
-            Alpha_value+=T_mean*np.cos(theta*i_day)
-            Beta_value+=T_mean*np.sin(theta*i_day)
-        Alpha_value=Alpha_value*coeff
-        Beta_value=Beta_value*coeff
-        return Alpha_value,Beta_value
-    Fourier_mean_dry_v=np.zeros([365])
-    Fourier_std_dry_v=np.zeros([365])
-    Fourier_mean_wet_v=np.zeros([365])
-    Fourier_std_wet_v=np.zeros([365])
-    print('Calculating Fourier Days:'+str(station_num)+'/'+str(Station_max))
-    tmp_T=in_var_data[:,:]
-    tmp_P=in_var_P[:]
-    tmp_T_W=tmp_T[np.logical_and(tmp_P,tmp_P),:]
-    tmp_T_D=tmp_T[np.logical_not(tmp_P),:]
-    mean_T_W=np.nanmean(tmp_T_W)
-    std_T_W=np.nanmean(in_W_std[:,:])
-    mean_T_D=np.nanmean(tmp_T_D)
-    std_T_D=np.nanmean(in_D_std[:,:])
-    Wet_day_vector=in_full_day_vector[np.logical_and(tmp_P,tmp_P)]
-    Dry_day_vector=in_full_day_vector[np.logical_not(tmp_P)]
-    Alpha_mean_values_W=[]
-    Beta_mean_values_W=[]
-    Alpha_std_values_W=[]
-    Beta_std_values_W=[]
-    Alpha_mean_values_D=[]
-    Beta_mean_values_D=[]
-    Alpha_std_values_D=[]
-    Beta_std_values_D=[]
-    for n in n_values:
-        #Dry Days
-        [Alpha,Beta]=Alpha_Beta_calculation_Mean(tmp_T_D,n,Dry_day_vector)
-        Alpha_mean_values_D.append(Alpha)
-        Beta_mean_values_D.append(Beta)
-        [Alpha_std,Beta_std]=Alpha_Beta_calculation_STD(tmp_T_D,n,Dry_day_vector)
-        Alpha_std_values_D.append(Alpha_std)
-        Beta_std_values_D.append(Beta_std)
-        #Wet Days
-        [Alpha,Beta]=Alpha_Beta_calculation_Mean(tmp_T_W,n,Wet_day_vector)
-        Alpha_mean_values_W.append(Alpha)
-        Beta_mean_values_W.append(Beta)
-        [Alpha_std,Beta_std]=Alpha_Beta_calculation_STD(tmp_T_W,n,Wet_day_vector)
-        Alpha_std_values_W.append(Alpha_std)
-        Beta_std_values_W.append(Beta_std)
-    for j in range(0,365):
-        val_D=0
-        std_val_D=0
-        val_W=0
-        std_val_W=0
-        count=0
-        for n in n_values:
-            t=j+1
-            val_D+=Alpha_mean_values_D[count]*np.cos(
-                2*np.pi*n*t/365)+Beta_mean_values_D[count]*np.sin(2*np.pi*n*t/365)
-            std_val_D+=Alpha_std_values_D[count]*np.cos(
-                2*np.pi*n*t/365)+Beta_std_values_D[count]*np.sin(2*np.pi*n*t/365)
-            val_W+=Alpha_mean_values_W[count]*np.cos(
-                2*np.pi*n*t/365)+Beta_mean_values_W[count]*np.sin(2*np.pi*n*t/365)
-            std_val_W+=Alpha_std_values_W[count]*np.cos(
-                2*np.pi*n*t/365)+Beta_std_values_W[count]*np.sin(2*np.pi*n*t/365)
-            count+=1
-        Fourier_mean_wet_v[j]=mean_T_W + val_W
-        Fourier_std_wet_v[j]=std_T_W + std_val_W
-        Fourier_mean_dry_v[j]=mean_T_D + val_D
-        Fourier_std_dry_v[j]=std_T_D + std_val_D
-    return station_num,Fourier_mean_wet_v,Fourier_std_wet_v,Fourier_mean_dry_v,Fourier_std_dry_v
+    from ai4water_eggs.seasonal import fit_conditioned
+    return fit_conditioned(in_var_data, in_var_P, in_D_std, in_W_std, in_full_day_vector, station_num, Station_max)
     
     
-def Fourier_Generation(Directory,Var):
+def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None):
     '''Handles the generation of the temperature model components'''
     import xarray as xr
     import numpy as np
     import os
     import multiprocessing
-    start_year='1950'
-    end_year='2022'
     variabile_name=Var
+    seasonal_support = []
     def Fourier_Hour_Solve(var_data,var_std,full_day_vector):
         Step_len=len(var_data[0,:,0])
         Station_max=len(var_data[0,0,:])
@@ -1053,15 +906,8 @@ def Fourier_Generation(Directory,Var):
             var_data_v=var_data[:,:,istation]
             var_std_v=var_std[:,:,istation]
             p.append((var_data_v,var_std_v,full_day_vector,istation,Station_max))
-        if multiprocessing.cpu_count()>=12:
-            with multiprocessing.Pool(processes=12) as pool:
-                r = pool.starmap(Fourier_Hour_Parallel,p)  # Parallel execution
-        elif multiprocessing.cpu_count()>=4:
-            with multiprocessing.Pool(processes=4) as pool:
-                r = pool.starmap(Fourier_Hour_Parallel,p)  # Parallel execution
-        else:
-            with multiprocessing.Pool(processes=1) as pool:
-                r = pool.starmap(Fourier_Hour_Parallel,p)  # Parallel execution
+        from ai4water_eggs.parallel import parallel_map
+        r = parallel_map(Fourier_Hour_Parallel, p, workers)
         #####
         for iv in range(0,len(r)):
             index=r[iv][0]
@@ -1084,15 +930,9 @@ def Fourier_Generation(Directory,Var):
             var_D_std_v=var_D_std[:,:,istation]
             var_W_std_v=var_W_std[:,:,istation]
             p.append((var_data_v,var_P_data_v,var_D_std_v,var_W_std_v,full_day_vector,istation,Station_max))
-        if multiprocessing.cpu_count()>=12:
-            with multiprocessing.Pool(processes=12) as pool:
-                r = pool.starmap(Fourier_Day_Parallel,p)  # Parallel execution
-        elif multiprocessing.cpu_count()>=4:
-            with multiprocessing.Pool(processes=4) as pool:
-                r = pool.starmap(Fourier_Day_Parallel,p)  # Parallel execution
-        else:
-            with multiprocessing.Pool(processes=1) as pool:
-                r = pool.starmap(Fourier_Day_Parallel,p)  # Parallel execution
+        from ai4water_eggs.parallel import parallel_map
+        r = parallel_map(Fourier_Day_Parallel, p, workers)
+        seasonal_support.extend(item[5] for item in r)
         #####
         for iv in range(0,len(r)):
             index=r[iv][0]
@@ -1102,7 +942,7 @@ def Fourier_Generation(Directory,Var):
             Fourier_std_dry[:,index]=r[iv][4]
         return Fourier_mean_wet,Fourier_std_wet,Fourier_mean_dry,Fourier_std_dry
     
-    year_str=start_year+'_'+end_year
+    year_str=str(start_year)+'_'+str(end_year)
     ERA5_name=Directory+'Detrended_'+variabile_name+'_' + year_str+'.nc'
     ERA5_P_name=Directory+'daily_tp_' + year_str+'.nc'
     data=xr.open_dataset(ERA5_name,decode_timedelta=False)
@@ -1139,7 +979,7 @@ def Fourier_Generation(Directory,Var):
     day_vector=Time_vector-Time_vector.astype('datetime64[Y]')
     new_day_vector=[]
     for day in day_vector:
-        new_day_vector.append(int(day)/86400000000000 +1)
+        new_day_vector.append(int(day / np.timedelta64(1, 'D')) + 1)
     P_day_vector=np.array(new_day_vector[:])
     #find std grid for mean purpose
     Std_grid=np.zeros([365,24,Station_max])
@@ -1214,17 +1054,19 @@ def Fourier_Generation(Directory,Var):
     ds['hour']=range(0,24)
     ds['time']=Time_vector
     ds['Residual_Grid']=(("time","hour","Station"),Residual_grid)
+    import json
+    ds.attrs['seasonal_support_report'] = json.dumps(seasonal_support)
     Full_Savename=Directory+variabile_name+'_PreSim_Coeff_'+year_str+'.nc'
     if os.path.isfile(Full_Savename):
         os.remove(Full_Savename)
     ds.to_netcdf(Full_Savename)
     return
 
-def XY_Mon(in_grid,in_month,in_Station_max,in_var_len):
+def XY_Mon(in_grid,in_month,in_Station_max,in_var_len,lagged_grid=None):
     import numpy as np
     '''Parallelised XY Matrix calculation'''
-    tmp_grid2=in_grid[:,1:]
-    tmp_grid3=in_grid[:,:-1]
+    tmp_grid2=in_grid[:,1:] if lagged_grid is None else in_grid
+    tmp_grid3=in_grid[:,:-1] if lagged_grid is None else lagged_grid
     print('Month #'+str(in_month))
     C0_Matrix=np.zeros([in_Station_max*in_var_len,in_Station_max*in_var_len])
     for i in range(0,in_Station_max*in_var_len):
@@ -1260,23 +1102,21 @@ def XY_Mon(in_grid,in_month,in_Station_max,in_var_len):
     return in_month,X,Y
     
     
-def XY_Hourly(Directory,variable_list):
+def XY_Hourly(Directory,variable_list,start_year=1950,end_year=2022,workers=None):
     '''Generates the correlation matricies for the variables that are simulated hourly'''
     import xarray as xr
     import numpy as np
     import os
     import multiprocessing
-    start_year='1950'
-    end_year='2022'
-    year_str=start_year+'_'+end_year
+    year_str=str(start_year)+'_'+str(end_year)
     res_data={}
     for variable_str in variable_list:
         ERA5_name=Directory+variable_str+'_PreSim_Coeff_' + year_str+'.nc'
         tmp_data=xr.open_dataset(ERA5_name,decode_timedelta=False)
-        data_val=tmp_data['Residual_Grid'].values[:-1,:,:]
+        data_val=tmp_data['Residual_Grid'].values
         res_data[variable_str]=data_val
-    time_vec=tmp_data['time'].values[:-1]
-    time_repeat=np.repeat(time_vec,24)
+    time_vec=tmp_data['time'].values
+    time_repeat=(time_vec[:, None] + np.arange(24)[None, :] * np.timedelta64(1, 'h')).ravel()
     Station_max=len(data_val[0,0,:])
     monvec=time_repeat.astype('datetime64[M]').astype(int) % 12
     time_len=len(data_val[:,0,0])*len(data_val[0,:,0])
@@ -1292,18 +1132,14 @@ def XY_Hourly(Directory,variable_list):
     ##### Multithreading Code
     p=[]
     for imonth in range(0,12):
-        tmp_grid=Full_grid[:,monvec==imonth]
-
-        p.append((tmp_grid,imonth,Station_max,var_len))
-    if multiprocessing.cpu_count()>=12:
-        with multiprocessing.Pool(processes=12) as pool:
-            r = pool.starmap(XY_Mon,p)  # Parallel execution
-    elif multiprocessing.cpu_count()>=4:
-        with multiprocessing.Pool(processes=4) as pool:
-            r = pool.starmap(XY_Mon,p)  # Parallel execution
-    else:
-        with multiprocessing.Pool(processes=1) as pool:
-            r = pool.starmap(XY_Mon,p)  # Parallel execution
+        # Use genuine adjacent hours; excluded years/days must not create false lags.
+        adjacent = np.diff(time_repeat) == np.timedelta64(1, 'h')
+        current = np.flatnonzero(adjacent & (monvec[1:] == imonth)) + 1
+        tmp_grid = Full_grid[:, current]
+        previous_grid = Full_grid[:, current - 1]
+        p.append((tmp_grid,imonth,Station_max,var_len,previous_grid))
+    from ai4water_eggs.parallel import parallel_map
+    r = parallel_map(XY_Mon, p, workers)
     #####
     for iv in range(0,len(r)):
         index=r[iv][0]
@@ -1324,7 +1160,7 @@ def XY_Hourly(Directory,variable_list):
     return
 
 
-def orography_prep(L_Directory,S_Directory,LatBounds,LonBounds):
+def orography_prep(L_Directory,S_Directory,LatBounds,LonBounds,start_year=1950,end_year=2022):
     '''Prepares orography for the output'''
     import xarray as xr
     import numpy as np
@@ -1335,7 +1171,7 @@ def orography_prep(L_Directory,S_Directory,LatBounds,LonBounds):
     lat=data['latitude'].values
     lon=data['longitude'].values
     
-    t2m_name=S_Directory+'t2m_1950_2022.nc'
+    t2m_name=S_Directory+'t2m_'+str(start_year)+'_'+str(end_year)+'.nc'
     t2m=xr.open_dataset(t2m_name,decode_timedelta=False)
     #Set coeffs
     R=6370000

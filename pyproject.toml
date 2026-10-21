@@ -1,0 +1,36 @@
+[project]
+name = "ai4water-eggs-wg"
+version = "0.1.0"
+description = "Local uv environment for the upstream EGGS-WG weather generator"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26,<3",
+    "scipy>=1.12,<2",
+    "xarray>=2025.1,<2027",
+    "cfgrib>=0.9.15,<0.10",
+    "eccodes>=2.42,<3",
+    # Explicit native dependency: avoid falling back to an older system library.
+    "eccodeslib>=2.42,<3; sys_platform != 'win32'",
+    "matplotlib>=3.9,<4",
+    "cftime>=1.6,<2",
+    "pyyaml>=6,<7",
+    "netcdf4>=1.7,<2",
+    "h5netcdf>=1.6,<2",
+    "h5py>=3.12,<4",
+    "cdsapi>=0.7.7,<0.8",
+    "pyshp>=2.3,<4",
+    "pyproj>=3.7,<4",
+    "shapely>=2.1,<3",
+]
+
+[dependency-groups]
+notebooks = ["nbclient>=0.10,<1", "nbconvert>=7,<8"]
+viewer = ["plotly>=6,<7"]
+
+[tool.uv]
+package = false
+
+# Keep this checkout independent of the enclosing AI4Water uv workspace.
+[tool.uv.workspace]
+members = []
