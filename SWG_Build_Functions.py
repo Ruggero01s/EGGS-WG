@@ -216,14 +216,20 @@ def Markov_Calculation(Directory,start_year=1950,end_year=2022):
                 total_counts[j,i,mon_ind,ind]+=1
                 if sub_data[k]:
                     rain_counts[j,i,mon_ind,ind]+=1
-    zero_count=total_counts[:,:,:,1]==0
-    for i in range(0,4):
-        rain_counts[zero_count,i]=np.nan
-        total_counts[zero_count,i]=np.nan
-    
-    p0=(rain_counts[:,:,:,0]+rain_counts[:,:,:,2])/((total_counts[:,:,:,0]+total_counts[:,:,:,2]))
-    p1=(rain_counts[:,:,:,1]+rain_counts[:,:,:,3])/((total_counts[:,:,:,1]+total_counts[:,:,:,3]))
-    Markov_probabilities=rain_counts/total_counts
+    # Undefined previous-state probabilities use the observed monthly wet rate.
+    # This retains valid dry-state counts in arid months instead of erasing them.
+    monthly_rate=np.zeros(total_counts.shape[:3])
+    for month in range(12):
+        selected=tp['time'].values.astype('datetime64[M]').astype(int) % 12 == month
+        monthly_rate[:,:,month]=tp['Precipitation_mask'].values[selected].mean(axis=0)
+    def supported_ratio(numerator, denominator):
+        return np.divide(numerator,denominator,out=monthly_rate.copy(),where=denominator>0)
+    p0=supported_ratio(rain_counts[:,:,:,0]+rain_counts[:,:,:,2],total_counts[:,:,:,0]+total_counts[:,:,:,2])
+    p1=supported_ratio(rain_counts[:,:,:,1]+rain_counts[:,:,:,3],total_counts[:,:,:,1]+total_counts[:,:,:,3])
+    Markov_probabilities=np.divide(rain_counts,total_counts,
+        out=np.broadcast_to(monthly_rate[:,:,:,None],rain_counts.shape).copy(),where=total_counts>0)
+    tp.attrs['unsupported_transition_probabilities']='Observed monthly wet fraction; no artificial wet days added'
+    tp.attrs['unsupported_transition_count']=int(np.sum(total_counts==0))
     Markov_probabilities=np.append(Markov_probabilities,np.expand_dims(p0, axis=3),axis=3)
     Markov_probabilities=np.append(Markov_probabilities,np.expand_dims(p1, axis=3),axis=3)
     Probability_labels=['p00','p01','p10','p11','p0','p1']
@@ -299,13 +305,10 @@ def Cross_Correlator(Directory,start_year=1950,end_year=2022):
                     P1_vector[station_1_ind,imon]=P1_data[i,j]
                     tmp_vec=correlation_grid[i,j,:,:,imon]
                     relist=tmp_vec.flatten()
-                    if np.sum(np.logical_not(np.isnan(relist)))!=int(np.nanmax(Station_mask)+1):
-                        relist[(np.isnan(relist))]=0
-                        correlation_matrix[station_1_ind,:,imon]=relist[
-                            np.logical_not(np.isnan(relist))]
-                    else:
-                        correlation_matrix[station_1_ind,:,imon]=relist[
-                            np.logical_not(np.isnan(relist))]
+                    active=np.isfinite(Station_mask).ravel()
+                    values=relist[active]
+                    correlation_matrix[station_1_ind,:,imon]=np.where(np.isfinite(values),values,0.)
+                    correlation_matrix[station_1_ind,station_1_ind,imon]=1.
                 else:
                     nan_ind+=1
     Station_len=int(np.nanmax(Station_mask))
@@ -494,8 +497,10 @@ def Amounts_Corr(Directory,start_year=1950,end_year=2022):
                     Station_mask[i,j]=station_1_ind
                     tmp_vec=correlation_grid[i,j,:,:,imon]
                     relist=tmp_vec.flatten()
-                    correlation_matrix[station_1_ind,:,imon]=relist[
-                        np.logical_not(np.isnan(relist))]
+                    active=np.isfinite(tp['tp'].values[0]).ravel()
+                    values=relist[active]
+                    correlation_matrix[station_1_ind,:,imon]=np.where(np.isfinite(values),values,0.)
+                    correlation_matrix[station_1_ind,station_1_ind,imon]=1.
                 else:
                     Station_mask[i,j]=np.nan
                     nan_ind+=1
@@ -881,19 +886,24 @@ def Fourier_Hour_Parallel(in_var_data,in_var_std,in_full_day_vector,station_num,
     return fit_hourly(in_var_data, in_var_std, in_full_day_vector, station_num, Station_max)
 
 
-def Fourier_Day_Parallel(in_var_data,in_var_P,in_D_std,in_W_std,in_full_day_vector,station_num,Station_max):
+def Fourier_Day_Parallel(in_var_data,in_var_P,in_D_std,in_W_std,in_full_day_vector,station_num,Station_max,seasonal_fit='legacy'):
     from ai4water_eggs.seasonal import fit_conditioned
-    return fit_conditioned(in_var_data, in_var_P, in_D_std, in_W_std, in_full_day_vector, station_num, Station_max)
+    return fit_conditioned(in_var_data, in_var_P, in_D_std, in_W_std, in_full_day_vector, station_num, Station_max, fit_mode=seasonal_fit)
     
     
-def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None):
+def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None,conditioning='legacy',seasonal_fit='legacy'):
     '''Handles the generation of the temperature model components'''
     import xarray as xr
     import numpy as np
     import os
     import multiprocessing
     variabile_name=Var
+    if conditioning not in ('legacy', 'matched'):
+        raise ValueError('Temperature residual conditioning must be legacy or matched.')
+    if seasonal_fit not in ('legacy', 'calendar-hourly'):
+        raise ValueError('Temperature Seasonal Fit must be legacy or calendar-hourly.')
     seasonal_support = []
+    scale_fallbacks = []
     def Fourier_Hour_Solve(var_data,var_std,full_day_vector):
         Step_len=len(var_data[0,:,0])
         Station_max=len(var_data[0,0,:])
@@ -929,7 +939,8 @@ def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None)
             var_P_data_v=var_P_data[:,istation]
             var_D_std_v=var_D_std[:,:,istation]
             var_W_std_v=var_W_std[:,:,istation]
-            p.append((var_data_v,var_P_data_v,var_D_std_v,var_W_std_v,full_day_vector,istation,Station_max))
+            task = (var_data_v,var_P_data_v,var_D_std_v,var_W_std_v,full_day_vector,istation,Station_max)
+            p.append(task if seasonal_fit == 'legacy' else task + (seasonal_fit,))
         from ai4water_eggs.parallel import parallel_map
         r = parallel_map(Fourier_Day_Parallel, p, workers)
         seasonal_support.extend(item[5] for item in r)
@@ -1003,6 +1014,8 @@ def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None)
     F_Mean_Grid,F_Std_Grid=Fourier_Hour_Solve(grid,Std_grid,new_day_vector)
     F_Mean_wet,F_Std_wet,F_Mean_dry,F_Std_dry=Fourier_Day_Solve(H_grid,P_grid,
                                             Std_grid_D,Std_grid_W,P_day_vector)
+    if not np.isfinite(F_Std_Grid).all() or np.any(F_Std_Grid <= 1e-8):
+        raise ValueError('Unconditioned hourly temperature scales must be finite and positive; review seasonal fit.')
     Hour_dim=list(range(0,len(F_Mean_Grid[:,0])))
     Day_dim=list(range(0,len(F_Mean_wet[:,0])))
     Station_dim=list(range(0,Station_max))
@@ -1030,16 +1043,29 @@ def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None)
             Conditional_Fourier_Mean_W[t_list,j]=Hours_mean[:,j]+W_Diff
             Conditional_Fourier_Std_D[t_list,j]=Hours_std[:,j]+D_Diff_std
             Conditional_Fourier_Std_W[t_list,j]=Hours_std[:,j]+W_Diff_std
-    Residual_grid=np.zeros(np.shape(grid))
-    for i in range(0,Station_max):
-        for j in range(0,Step_len):
-            for k in range(0,time_len):
-                i_day=new_day_vector[k]-1
-                if i_day==365:
-                    i_day=364
-                time_index=int(j+i_day*Step_len)
-                Residual_grid[k,j,i]=(
-                    grid[k,j,i]-F_Mean_Grid[time_index,i])/F_Std_Grid[time_index,i]
+            from ai4water_eggs.temperature import positive_conditioned_scale
+            for label, target, conditional_grid in [('wet',Day_wet_std[j],Conditional_Fourier_Std_W),
+                                         ('dry',Day_dry_std[j],Conditional_Fourier_Std_D)]:
+                if not np.isfinite(conditional_grid[t_list,j]).all() or np.any(conditional_grid[t_list,j] <= 1e-8):
+                    conditional_grid[t_list,j], _ = positive_conditioned_scale(Hours_std[:,j],target)
+                    scale_fallbacks.append({'day':i+1,'station':j,'state':label})
+    if conditioning == 'matched':
+        from ai4water_eggs.temperature import matched_residuals
+        Residual_grid = matched_residuals(
+            grid, P_grid, new_day_vector,
+            mean_wet=Conditional_Fourier_Mean_W, mean_dry=Conditional_Fourier_Mean_D,
+            std_wet=Conditional_Fourier_Std_W, std_dry=Conditional_Fourier_Std_D)
+    else:
+        Residual_grid=np.zeros(np.shape(grid))
+        for i in range(0,Station_max):
+            for j in range(0,Step_len):
+                for k in range(0,time_len):
+                    i_day=new_day_vector[k]-1
+                    if i_day==365:
+                        i_day=364
+                    time_index=int(j+i_day*Step_len)
+                    Residual_grid[k,j,i]=(
+                        grid[k,j,i]-F_Mean_Grid[time_index,i])/F_Std_Grid[time_index,i]
     ds = xr.Dataset(
         data_vars=dict(Fourier_Mean_Dry=(["hour_of_year","Station"], Conditional_Fourier_Mean_D)),
         coords=dict(hour_of_year=Hour_dim,Station=Station_dim))
@@ -1056,17 +1082,27 @@ def Fourier_Generation(Directory,Var,start_year=1950,end_year=2022,workers=None)
     ds['Residual_Grid']=(("time","hour","Station"),Residual_grid)
     import json
     ds.attrs['seasonal_support_report'] = json.dumps(seasonal_support)
+    ds.attrs['positive_scale_fallbacks'] = json.dumps(scale_fallbacks)
+    ds.attrs['temperature_residual_conditioning'] = conditioning
+    ds.attrs['temperature_seasonal_fit'] = seasonal_fit
+    ds.attrs['temperature_fit_version'] = 'matched-residual-v1' if conditioning == 'matched' else 'legacy'
     Full_Savename=Directory+variabile_name+'_PreSim_Coeff_'+year_str+'.nc'
     if os.path.isfile(Full_Savename):
         os.remove(Full_Savename)
     ds.to_netcdf(Full_Savename)
     return
 
-def XY_Mon(in_grid,in_month,in_Station_max,in_var_len,lagged_grid=None):
+def XY_Mon(in_grid,in_month,in_Station_max,in_var_len,lagged_grid=None,fit_mode='legacy'):
     import numpy as np
     '''Parallelised XY Matrix calculation'''
     tmp_grid2=in_grid[:,1:] if lagged_grid is None else in_grid
     tmp_grid3=in_grid[:,:-1] if lagged_grid is None else lagged_grid
+    if fit_mode == 'forward':
+        from ai4water_eggs.temperature import fit_forward_var
+        transition, factor, diagnostics = fit_forward_var(tmp_grid2, tmp_grid3)
+        return in_month, transition, factor, diagnostics
+    if fit_mode != 'legacy':
+        raise ValueError('Temperature VAR fit must be legacy or forward.')
     print('Month #'+str(in_month))
     C0_Matrix=np.zeros([in_Station_max*in_var_len,in_Station_max*in_var_len])
     for i in range(0,in_Station_max*in_var_len):
@@ -1080,7 +1116,8 @@ def XY_Mon(in_grid,in_month,in_Station_max,in_var_len,lagged_grid=None):
     C1_Matrix=np.zeros([in_Station_max*in_var_len,in_Station_max*in_var_len])
     for i in range(0,in_Station_max*in_var_len):
         for j in range(0,in_Station_max*in_var_len):
-            C1_Matrix[j,i]=np.corrcoef(tmp_grid2[i,:],tmp_grid3[j,:])[0,1]
+            # Rows = current state; columns = previous state (simulation uses X @ previous).
+            C1_Matrix[i,j]=np.corrcoef(tmp_grid2[i,:],tmp_grid3[j,:])[0,1]
     #Now we need to calculate X and Y vectors
     C0_inv=np.linalg.inv(C0_Matrix)
     X=np.matmul(C1_Matrix,C0_inv)
@@ -1102,19 +1139,25 @@ def XY_Mon(in_grid,in_month,in_Station_max,in_var_len,lagged_grid=None):
     return in_month,X,Y
     
     
-def XY_Hourly(Directory,variable_list,start_year=1950,end_year=2022,workers=None):
+def XY_Hourly(Directory,variable_list,start_year=1950,end_year=2022,workers=None,fit_mode='legacy'):
     '''Generates the correlation matricies for the variables that are simulated hourly'''
     import xarray as xr
     import numpy as np
     import os
     import multiprocessing
     year_str=str(start_year)+'_'+str(end_year)
+    if fit_mode not in ('legacy', 'forward'):
+        raise ValueError('Temperature VAR fit must be legacy or forward.')
     res_data={}
+    conditioning_modes = set()
+    seasonal_modes = set()
     for variable_str in variable_list:
         ERA5_name=Directory+variable_str+'_PreSim_Coeff_' + year_str+'.nc'
         tmp_data=xr.open_dataset(ERA5_name,decode_timedelta=False)
         data_val=tmp_data['Residual_Grid'].values
         res_data[variable_str]=data_val
+        conditioning_modes.add(tmp_data.attrs.get('temperature_residual_conditioning', 'legacy'))
+        seasonal_modes.add(tmp_data.attrs.get('temperature_seasonal_fit', 'legacy'))
     time_vec=tmp_data['time'].values
     time_repeat=(time_vec[:, None] + np.arange(24)[None, :] * np.timedelta64(1, 'h')).ravel()
     Station_max=len(data_val[0,0,:])
@@ -1137,7 +1180,8 @@ def XY_Hourly(Directory,variable_list,start_year=1950,end_year=2022,workers=None
         current = np.flatnonzero(adjacent & (monvec[1:] == imonth)) + 1
         tmp_grid = Full_grid[:, current]
         previous_grid = Full_grid[:, current - 1]
-        p.append((tmp_grid,imonth,Station_max,var_len,previous_grid))
+        arguments = (tmp_grid,imonth,Station_max,var_len,previous_grid)
+        p.append(arguments if fit_mode == 'legacy' else arguments + (fit_mode,))
     from ai4water_eggs.parallel import parallel_map
     r = parallel_map(XY_Mon, p, workers)
     #####
@@ -1150,6 +1194,13 @@ def XY_Hourly(Directory,variable_list,start_year=1950,end_year=2022,workers=None
         coords=dict(month=range(0,12),Arb_dimm=list(range(0,Station_max*var_len)),
         Arb_dimm_2=list(range(0,Station_max*var_len))))
     ds['Y_matrix']= (("month",'Arb_dimm','Arb_dimm_2'),Y_matrix)
+    import json
+    ds.attrs['temperature_var_fit'] = fit_mode
+    ds.attrs['temperature_fit_version'] = 'forward-var-v1' if fit_mode == 'forward' else 'legacy'
+    ds.attrs['temperature_residual_conditioning'] = ','.join(sorted(conditioning_modes))
+    ds.attrs['temperature_seasonal_fit'] = ','.join(sorted(seasonal_modes))
+    if fit_mode == 'forward':
+        ds.attrs['temperature_var_diagnostics'] = json.dumps([item[3] for item in r])
     full_var_str=''
     for i in range(0,len(variable_list)):
         full_var_str=full_var_str+variable_list[i]+'_'

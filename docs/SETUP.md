@@ -19,12 +19,13 @@ Independent `.venv` and lockfile. Optional notebook tools: `--group notebooks`.
 | `capitanata_annual_2026_n1000.yaml` | Full-year 2026; N=1,000; all historical years | `outputs/` |
 | `capitanata_test.yaml` | Boundary-masked; April–October 2026; currently N=100 | `outputs/` |
 | `italy_pilot.yaml` | Single cell, annual | `../../analysis_results/eggs_wg/` |
-| `italy.yaml`, `egypt.yaml`, `algeria.yaml`, `tunisia.yaml` | Regional examples; Tunisia excludes 2002 | `../../analysis_results/eggs_wg/` |
+| `italy.yaml`, `egypt.yaml`, `algeria.yaml`, `tunisia.yaml` | Legacy bounding-box examples | `../../analysis_results/eggs_wg/` |
+| `transfer_CASE_baseline.yaml` | Egypt/Algeria/Tunisia study polygons; N=1,000 | `outputs/transfer_n1000/CASE/` |
 
 - YAML paths resolve relative to the **YAML file**.
 - Capitanata: training 1990–2025; reference 2020; stationary; 46 cells. Annual: 365 days; April–October: 214 days.
 - Config name: `capitanata_ensemble_apr_oct_2026`; existing run `capitanata_test_n100` used a name override.
-- Other regional examples need fitting/validation; Tunisia lacks May 2002.
+- [Transfer trial](TRANSFER_TRIAL.md): study-area masks; Tunisia's repaired May 2002 retained.
 
 ## Train / generate
 
@@ -45,9 +46,31 @@ uv run --locked python ensemble.py generate configs/capitanata_test.yaml \
 
 - Same-name generation replaces weather/metrics. `--prepare-only` can replace prepared data while leaving old simulations; use a new name when changing training.
 - Frozen reuse requires matching training settings; cannot combine with regeneration; ignores new downloads.
+- [Common bug fixes](COMMON_BUGFIXES.md) apply to every candidate. Older unversioned fits require a new experiment with `Reuse Training From` (prepared observations reused; coefficients rebuilt), or full regeneration.
 - Training years: inclusive. Simulation end: exclusive (`2026-11-01` means through October 31).
 - Keep `Non-stationary Mode: false` for this reference-climate workflow.
-- Member i seed = base + i − 1. `Workers` controls fitting; members run serially.
+- Member i seed = base + i − 1. `Workers` controls fitting; `Simulation Workers` controls generation (default 1).
+
+### NetCDF storage
+
+New runs default to compressed float32 weather files (DEFLATE level 1 + shuffle). Fitting/generation calculations remain float64; storage settings propagate through postprocessing.
+
+```yaml
+Weather Output Precision: float32
+NetCDF Compression: true
+```
+
+One annual Capitanata member: **13.10 → 1.51 MiB** (88.5% smaller); roughly 1.5 GiB per 1,000 members, weather only. Measured storage rounding: <0.00002°C and <0.000004 mm.
+
+For exact float64 values, set `Weather Output Precision: float64` and keep compression enabled: **3.58 MiB/member** in the same check (72.7% smaller). Actual sizes depend on domain/weather. Changing defaults alone does not rewrite existing files; the latest transfer runs already use compact storage.
+
+Compress existing weather files, preserving their precision and checking every raw value before replacement:
+
+```bash
+uv run --locked python scripts/compress_weather.py outputs --workers 4 --apply
+```
+
+Already compressed files are skipped; shared hardlinks are preserved. Logs: `outputs/compression-*.jsonl`; totals: matching `.json`. Omitting `--apply` only inventories files. Run while generation is idle.
 
 ## View / select
 

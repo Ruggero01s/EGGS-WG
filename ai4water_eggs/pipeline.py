@@ -12,6 +12,25 @@ from ai4water_eggs.inputs import input_signature, prepare_inputs, training_confi
 import SWG_Build_Functions as build
 import SWG_Model as model
 
+FIT_SAFEGUARDS_VERSION = 'common-bugfixes-v1'
+
+
+def _prepare_bugfix_cache(data, period, names, allow_refit):
+    """Reject old fits, or detach copied coefficients while keeping prepared inputs."""
+    marker = data / 'fit_safeguards.json'
+    if marker.is_file() and json.loads(marker.read_text()).get('version') == FIT_SAFEGUARDS_VERSION:
+        return
+    filenames = [f'{prefix}_{period}.nc' for prefix in
+                 ('Markov', 'Corr', 'O_Omega', 'tp_Params', 'Amounts_Corr', 'A_Omega')]
+    filenames += [f'{name}_PreSim_Coeff_{period}.nc' for name in names]
+    filenames += ['_'.join(names) + '_XY_Matrix.nc']
+    stale = [data / name for name in filenames if (data / name).is_file()]
+    if stale and not allow_refit:
+        raise ValueError('Cached fits predate common bug fixes. Use a new experiment with Reuse Training From, or regenerate.')
+    for path in stale:
+        path.unlink()
+    marker.unlink(missing_ok=True)
+
 
 def reuse_training(source, root, signature):
     """Reuse matching prepared inputs/fits while keeping scenario outputs separate."""
@@ -46,9 +65,45 @@ def simulation_interval(params):
     return first, stop
 
 
+def _prepare_temperature_cache(data, period, names, conditioning, var_fit, allow_refit, seasonal_fit='legacy'):
+    """Check all fit dependencies before changing experiment metadata or files."""
+    stale, missing = [], False
+    for name in names:
+        path = data / f'{name}_PreSim_Coeff_{period}.nc'
+        if not path.is_file():
+            missing = True
+            continue
+        with xr.open_dataset(path) as cached:
+            mode = cached.attrs.get('temperature_residual_conditioning', 'legacy')
+            seasonal = cached.attrs.get('temperature_seasonal_fit', 'legacy')
+        if mode != conditioning or seasonal != seasonal_fit:
+            stale.append(path)
+    xy = data / ('_'.join(names) + '_XY_Matrix.nc')
+    if xy.is_file():
+        with xr.open_dataset(xy) as cached:
+            mode = cached.attrs.get('temperature_var_fit', 'legacy')
+            residual_modes = set(cached.attrs.get('temperature_residual_conditioning', 'legacy').split(','))
+            seasonal_modes = set(cached.attrs.get('temperature_seasonal_fit', 'legacy').split(','))
+        if stale or missing or mode != var_fit or residual_modes != {conditioning} or seasonal_modes != {seasonal_fit}:
+            stale.append(xy)
+    if stale and not allow_refit:
+        raise ValueError('Temperature fit settings/dependencies changed. Use a new experiment with Reuse Training From, or regenerate.')
+    for path in stale:
+        path.unlink()  # Detach only the copied fit; never overwrite a source hardlink.
+
+
 def run(params, config_path, prepare_only=False):
     params = dict(params)
+    if params.get('Pooled Corrections') or params.get('Subset Source'):
+        raise ValueError('Generate the raw source experiment, then reapply its frozen correction; corrected outputs cannot be regenerated directly.')
     params.setdefault('Variables', ['tp', 't2m'])
+    conditioning = params.get('Temperature Residual Conditioning', 'legacy')
+    var_fit = params.get('Temperature VAR Fit', 'legacy')
+    seasonal_fit = params.get('Temperature Seasonal Fit', 'legacy')
+    if conditioning not in ('legacy', 'matched') or var_fit not in ('legacy', 'forward'):
+        raise ValueError('Temperature Residual Conditioning: legacy|matched; Temperature VAR Fit: legacy|forward.')
+    if seasonal_fit not in ('legacy', 'calendar-hourly'):
+        raise ValueError('Temperature Seasonal Fit: legacy|calendar-hourly.')
     if set(params['Variables']) not in ({'tp', 't2m'}, {'tp', 't2m', 'd2m'}):
         raise ValueError('Variables must contain tp and t2m, optionally d2m.')
     params['Variables'] = [name for name in ('tp', 't2m', 'd2m') if name in params['Variables']]
@@ -64,8 +119,16 @@ def run(params, config_path, prepare_only=False):
     first = int(str(first_date)[:4])
     stop = max(first + 1, int(str(stop_date)[:4]))
     simulations, workers = params['Number of Simulations'], params.get('Workers', 4)
+    simulation_workers = params.get('Simulation Workers', 1)
+    params.setdefault('Weather Output Precision', 'float32')
+    params.setdefault('NetCDF Compression', True)
+    storage = {'precision': params['Weather Output Precision'],
+               'compression': params['NetCDF Compression']}
+    if storage['precision'] not in ('float32', 'float64') or type(storage['compression']) is not bool:
+        raise ValueError('Weather Output Precision: float32|float64; NetCDF Compression: true|false.')
     if (stop <= first or type(simulations) is not int or simulations < 1
-            or type(workers) is not int or workers < 1):
+            or type(workers) is not int or workers < 1
+            or type(simulation_workers) is not int or simulation_workers < 1):
         raise ValueError('Set increasing simulation years, at least one simulation, and positive Workers.')
     config_path = Path(config_path).resolve()
     for key in ('ERA5 Directory', 'Data Output Directory'):
@@ -95,7 +158,8 @@ def run(params, config_path, prepare_only=False):
     regenerate = params.get('Regenerate Data', False)
     if params.get('Reuse Training From') and regenerate:
         raise ValueError('Choose either Reuse Training From or Regenerate Data.')
-    if params.get('Reuse Training From') and not data.exists():
+    fresh_reuse = bool(params.get('Reuse Training From') and not data.exists())
+    if fresh_reuse:
         root.mkdir(parents=True, exist_ok=True)
         reuse_training(params['Reuse Training From'], root, inventory['signature'])
     if report_path.is_file():
@@ -118,6 +182,8 @@ def run(params, config_path, prepare_only=False):
     else:
         report = json.loads(report_path.read_text())
         print(f"Reusing {report['retained_days']} prepared training days.", flush=True)
+    _prepare_bugfix_cache(data, period, temperature_names, fresh_reuse)
+    _prepare_temperature_cache(data, period, temperature_names, conditioning, var_fit, fresh_reuse, seasonal_fit)
     (root / 'run_config.json').write_text(json.dumps(params, indent=2) + '\n')
     if prepare_only:
         print(f'Input preparation complete: {report_path}', flush=True)
@@ -143,25 +209,36 @@ def run(params, config_path, prepare_only=False):
         stage(f'{prefix}_{period}.nc', function, directory, **kwargs)
     for name in temperature_names:
         filename = f'{name}_PreSim_Coeff_{period}.nc'
-        stage(filename, build.Fourier_Generation, directory, name, workers=workers)
+        options = {'workers': workers}
+        if conditioning != 'legacy':
+            options['conditioning'] = conditioning
+        if seasonal_fit != 'legacy':
+            options['seasonal_fit'] = seasonal_fit
+        stage(filename, build.Fourier_Generation, directory, name, **options)
         with xr.open_dataset(data / filename) as coefficients:
             for key in ('Fourier_Mean_Wet', 'Fourier_Mean_Dry', 'Fourier_Std_Wet',
                         'Fourier_Std_Dry', 'Residual_Grid'):
                 if not np.isfinite(coefficients[key].values).all():
                     raise ValueError(f'{filename}: non-finite {key}; insufficient training support for this fit.')
-    stage('_'.join(temperature_names) + '_XY_Matrix.nc', build.XY_Hourly,
-          directory, temperature_names, workers=workers)
+                if key.startswith('Fourier_Std') and np.any(coefficients[key].values <= 1e-8):
+                    raise ValueError(f'{filename}: nonpositive {key}; review seasonal scale support.')
+    xy_filename = '_'.join(temperature_names) + '_XY_Matrix.nc'
+    options = {'workers': workers}
+    if var_fit != 'legacy':
+        options['fit_mode'] = var_fit
+    stage(xy_filename, build.XY_Hourly, directory, temperature_names, **options)
+    (data / 'fit_safeguards.json').write_text(json.dumps({'version': FIT_SAFEGUARDS_VERSION}) + '\n')
     simulation_dir = root / 'Simulation'
     for filename in ('scenario_catalog.json', 'scenario_metrics.csv', 'scenario_monthly_metrics.csv'):
         (root / filename).unlink(missing_ok=True)
     if simulation_dir.exists():
         shutil.rmtree(simulation_dir)
     simulation_dir.mkdir()
-    for number in range(simulations):
-        model.Model_run(str(root) + '/', number, first, stop, temperature_names,
-                        **period_args, spin_up_days=params.get('Spin Up Days', 1000),
-                        start_date=str(first_date), end_date=str(stop_date),
-                        seed=params.get('Random Seed', 20261019) + number)
+    from ai4water_eggs.parallel import parallel_map
+    tasks = [(str(root) + '/', number, first, stop, temperature_names,
+              start, end, params.get('Spin Up Days', 1000), str(first_date), str(stop_date),
+              params.get('Random Seed', 20261019) + number, storage) for number in range(simulations)]
+    parallel_map(model.Model_run, tasks, simulation_workers)
     if params.get('Variable Adjust', True):
         model.Precipitation_Adjust(str(root) + '/', directory, simulations, **period_args)
         model.Sim_replace(str(root) + '/', simulations)
@@ -184,7 +261,8 @@ def run(params, config_path, prepare_only=False):
             scenario_number=number,
             generated_by='EGGS-WG with AI4Water local-input adapter')
         output['simulation_Precipitation'].attrs['description'] = 'Total for the labelled UTC day'
-        output.to_netcdf(path)
+        from ai4water_eggs.storage import write_weather
+        write_weather(output, path, storage)
         output.close()
     print(f'Completed: {simulation_dir}', flush=True)
     if params.get('Scenario Metrics', False):

@@ -7,6 +7,7 @@ ERA5-Land stochastic weather generator: uv setup, configurable training, ensembl
 | [Setup](docs/SETUP.md) | Install, train/retrain, generate N, select, view through SSH |
 | [Validation](docs/VALIDATION.md) | Historical envelopes, percentiles and reproduction commands |
 | [Limitations](docs/LIMITATIONS.md) | Measured problems, interpretation and application gaps |
+| [Common bug fixes](docs/COMMON_BUGFIXES.md) | Shared fixes for every new candidate; cached fits require rebuilding |
 | [Manual](docs/references/EGGS_WG_Operations.pdf) / [paper](docs/references/eggsws_paper.pdf) | Upstream references |
 
 ```bash
@@ -17,7 +18,12 @@ uv run --locked --group viewer python viewer.py --root outputs --port 8765
 
 Current local run: `outputs/capitanata_annual_2026_n1000`; full year, 1,000 members,
 46 cells; fitted on all 1990–2025. **Mismatches:** narrow rainfall/ETo spread and temperature extremes.
-[Latest plots and tables](outputs/capitanata_annual_2026_n1000/Assessment/index.html): annual and April–October comparisons (local output).
+[Baseline assessment](outputs/capitanata_annual_2026_n1000/Assessment/index.html): annual and April–October comparisons.
+[Capitanata temperature trial](outputs/capitanata_temperature_n1000/Assessment/index.html): 1,000 matched members; temperature-template changes with/without pooled rainfall correction. [Results/method](docs/TEMPERATURE_TRIAL.md).
+[Earlier repair trial](outputs/capitanata_fix_trial/Assessment/index.html): 200 matched members. [Commands](docs/VARIABILITY_TRIAL.md).
+[Temperature diagnosis](outputs/capitanata_fix_trial/TemperatureDiagnosis/README.md): controlled replay isolates seasonal mean/scale fitting issues.
+[Transfer trial](outputs/transfer_n1000/Assessment/index.html): Capitanata, Egypt, Algeria and Tunisia; 1,000 paired members per variant. Maximum-temperature improvements do not generalize; rainfall/ETo results are mixed. [Results/run](docs/TRANSFER_TRIAL.md).
+[Latest: common-bugfix baseline](outputs/bugfix_baseline_n300/Assessment/index.html): 300 members per case, matched archived seeds; original adjustments on, experimental corrections off. Main spread limitations remain. [Results/run](docs/BUGFIX_BASELINE.md).
 
 ## Layout
 
@@ -27,7 +33,7 @@ Main.py                          Compatibility wrapper for generate
 SWG_*.py                          Fitting and generation
 ai4water_eggs/                    Local workflow, metrics, validation, viewer
 configs/                          YAML; paths relative to each YAML
-scripts/                         Setup check, assessment and adjustment diagnostic
+scripts/                          Setup check, assessments and diagnostics
 viewer/                           Web assets and local Plotly
 tests/                            Unit, integration and browser checks
 docs/                             Guides and reference PDFs

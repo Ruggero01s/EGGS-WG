@@ -72,3 +72,5 @@ uv run --locked --group viewer python -m unittest discover -s tests -v
 uv run --locked --with playwright python tests/check_assessment_browser.py \
   outputs/capitanata_annual_2026_n1000/Assessment --live-url http://127.0.0.1:8765
 ```
+
+Latest repair comparison: [N=200 trial](VARIABILITY_TRIAL.md); the N=1,000 baseline is retained.

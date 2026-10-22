@@ -34,6 +34,25 @@ def main():
     select.add_argument('--metric', default='total_precipitation_mm')
     select.add_argument('--percentile', type=float, required=True)
     select.add_argument('--output', type=Path, help='Write the selected scenario details as JSON.')
+    fit = commands.add_parser('fit-correction', help='Fit fixed pooled rainfall/temperature corrections on calibration seeds.')
+    fit.add_argument('calibration', type=Path)
+    fit.add_argument('--output', type=Path, required=True)
+    fit.add_argument('--historical', type=Path)
+    correct = commands.add_parser('correct', help='Apply a frozen correction to disjoint scenario seeds, then rebuild metrics.')
+    correct.add_argument('experiment', type=Path)
+    correct.add_argument('--correction', type=Path, required=True)
+    correct.add_argument('--output', type=Path, required=True)
+    for command in (fit, correct):
+        command.add_argument('--no-rain', action='store_true')
+        command.add_argument('--no-temperature', action='store_true')
+    subset = commands.add_parser('subset', help='Extract a member range into a separate experiment and rebuild metrics.')
+    subset.add_argument('experiment', type=Path)
+    subset.add_argument('--members', nargs=2, type=int, required=True, metavar=('FIRST','LAST'))
+    subset.add_argument('--output', type=Path, required=True)
+    subset.add_argument('--label')
+    compare = commands.add_parser('compare', help='Build a concise paired variability-trial report.')
+    compare.add_argument('--reports', type=Path, nargs='+', required=True)
+    compare.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if args.command == 'generate':
         params = yaml.safe_load(args.config.read_text())
@@ -42,6 +61,30 @@ def main():
                 params[key] = value
         params['Scenario Metrics'] = True
         run(params, args.config, prepare_only=args.prepare_only)
+    elif args.command == 'fit-correction':
+        from ai4water_eggs.corrections import fit_corrections
+        fit_corrections(args.calibration, args.output, args.historical,
+                        rain=not args.no_rain, temperature=not args.no_temperature)
+    elif args.command == 'correct':
+        from ai4water_eggs.corrections import apply_corrections
+        output = apply_corrections(args.experiment, args.output, args.correction,
+                                   rain=not args.no_rain, temperature=not args.no_temperature)
+        config = json.loads((output / 'run_config.json').read_text())
+        analyze_ensemble(output, scales=config.get('Drought Scales', [1, 3, 6]))
+        application = output / 'correction_application.json'
+        provenance = json.loads(application.read_text())
+        provenance['metrics_status'] = 'Complete; scenario_catalog.json'
+        application.write_text(json.dumps(provenance, indent=2) + '\n')
+        (output / '.in_progress').unlink(missing_ok=True)
+    elif args.command == 'subset':
+        from ai4water_eggs.trial import subset_experiment
+        output = subset_experiment(args.experiment, args.output, *args.members, args.label)
+        config = json.loads((output / 'run_config.json').read_text())
+        analyze_ensemble(output, scales=config.get('Drought Scales', [1, 3, 6]))
+        (output / '.in_progress').unlink(missing_ok=True)
+    elif args.command == 'compare':
+        from ai4water_eggs.trial import build_trial_report
+        build_trial_report(args.reports, args.output)
     elif args.command == 'analyze':
         analyze_ensemble(args.experiment, args.scales)
     elif args.command == 'validate':

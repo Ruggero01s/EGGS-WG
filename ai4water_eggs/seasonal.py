@@ -40,7 +40,10 @@ def fit_hourly(temperature, standard_deviations, day_numbers, station, station_c
         project(std.ravel(), harmonics, np.mean(standard_deviations))
 
 
-def fit_conditioned(temperature, precipitation, dry_std, wet_std, day_numbers, station, station_count):
+def fit_conditioned(temperature, precipitation, dry_std, wet_std, day_numbers, station, station_count,
+                    fit_mode='legacy'):
+    if fit_mode not in ('legacy', 'calendar-hourly'):
+        raise ValueError('Temperature Seasonal Fit must be legacy or calendar-hourly.')
     print(f'Calculating Fourier Days:{station}/{station_count}', flush=True)
     day_numbers = np.asarray(day_numbers)
     results, report = {}, {'station': station}
@@ -53,10 +56,13 @@ def fit_conditioned(temperature, precipitation, dry_std, wet_std, day_numbers, s
         for index in range(365):
             group = values[days == index + 1]
             if len(group):
-                mean[index], std[index] = np.nanmean(group), np.nanstd(group)
+                mean[index] = np.nanmean(group)
+                std[index] = (np.nanstd(group) if fit_mode == 'legacy'
+                              else np.nanmean(np.nanstd(group, axis=0)))
         mean, count = fill_calendar_gaps(mean)
         std, _ = fill_calendar_gaps(std)
         report[label + '_calendar_days_interpolated'] = count
-        results[label] = (project(mean, [1, 2, 3, 4, 6], np.nanmean(values)),
+        baseline = np.nanmean(values) if fit_mode == 'legacy' else mean.mean()
+        results[label] = (project(mean, [1, 2, 3, 4, 6], baseline),
                           project(std, [1, 2, 3, 4, 6], np.nanmean(base_std)))
     return station, *results['wet'], *results['dry'], report

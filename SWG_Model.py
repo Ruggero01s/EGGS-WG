@@ -9,6 +9,7 @@ import numpy as np
 from scipy.special import erf
 import scipy.stats as scistat
 import scipy
+from ai4water_eggs.storage import write_weather
 
 def Data_load(variable_name,Directory,start_year=1950,end_year=2022):
     '''Load in the simulation coefficeints from generated files'''
@@ -178,7 +179,7 @@ def D2M_2_RH(in_data):
     RH=RH*100
     return RH
 
-def Save_decade(Data, Filename):
+def Save_decade(Data, Filename, storage=None):
     """Save a daily block, including only available variables and metadata."""
     dates = np.asarray(Data['Date']).astype('datetime64[D]').astype('datetime64[ns]')
     ds = xr.Dataset(
@@ -192,13 +193,13 @@ def Save_decade(Data, Filename):
                 ('simulation_time', 'hour', 'station'), np.moveaxis(Data[name], 2, 0).transpose(0, 2, 1))
     if 'Altitude' in Data:
         ds['Altitude'] = (('latitude', 'longitude'), Data['Altitude'])
-    ds.to_netcdf(Filename)
+    write_weather(ds, Filename, storage)
     ds.close()
 
 
 def Model_run(Directory, Sim_num, Simulation_start_year, Simulation_end_year,
               variable_list, start_year=1950, end_year=2022, spin_up_days=1000,
-              start_date=None, end_date=None, seed=None):
+              start_date=None, end_date=None, seed=None, storage=None):
     """Run any simulation interval, with a configurable historical training period."""
     current = np.datetime64(start_date or f'{Simulation_start_year}-01-01', 'D')
     end = np.datetime64(end_date or f'{Simulation_end_year}-01-01', 'D')
@@ -243,7 +244,7 @@ def Model_run(Directory, Sim_num, Simulation_start_year, Simulation_end_year,
             block['Altitude'] = altitude
         label = f'{year}_{str(stop)[:4]}' if str(current)[5:] == '01-01' and str(stop)[5:] == '01-01' else f'{current}_{stop}'
         filename = f'{sim_dir}Simulation_{label}.nc'
-        Save_decade(block, filename)
+        Save_decade(block, filename, storage)
         print(f'Saved simulation {Sim_num + 1}: {current} to {stop}', flush=True)
         current = stop
     rain.close()
@@ -320,7 +321,7 @@ def Precipitation_Adjust(Base_S_dir,observation_dir,Sim_num,start_year=1950,end_
             f_t_name=Sim_Dir+'tmp_'+S_Filenames[j]
             if os.path.isfile(f_t_name):
                 os.remove(f_t_name)
-            tmp_data.to_netcdf(f_t_name)
+            write_weather(tmp_data, f_t_name)
             tmp_data.close()
     Obs_tp.close()
     return
@@ -332,6 +333,7 @@ def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num,start_year=1950,
     Obs_t2m=xr.open_dataset(O_filename,decode_timedelta=False)
     Obs_full_data=Obs_t2m['t2m'].values
     Obs_time=Obs_t2m['time'].values
+    observed_cycles = {}
     for i in range(0,Sim_num):
         Sim_Dir=Base_S_dir+'Simulation/Simulation_'+str(i+1)+'/'
         S_Filenames,S_Data=Sim_Loader(Sim_Dir)
@@ -358,18 +360,21 @@ def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num,start_year=1950,
         for i in range(0,12):
             if not np.any(sim_mon == i):
                 continue
-            Obs_mon_mean=np.nanmean(Obs_full_data[Obs_mon==i,:,:,:])
+            nan_filter=np.isnan(Station_Mask[:,:])
+            cache_key=(i, nan_filter.shape, nan_filter.tobytes())
+            if cache_key not in observed_cycles:
+                Obs_mon_mean=np.nanmean(Obs_full_data[Obs_mon==i,:,:,:])
+                curve=np.empty(24)
+                for z in range(24):
+                    Obs_mon_data=Obs_full_data[Obs_mon==i,z,:,:].astype('float64')
+                    Obs_mon_data[:,nan_filter]=np.nan
+                    curve[z]=np.nanmean(Obs_mon_data)-Obs_mon_mean
+                observed_cycles[cache_key]=curve
+            Obs_season_di[i]=observed_cycles[cache_key]
             Sim_mon_mean=np.nanmean(t2m[sim_mon==i,:,:])
             for z in range(0,24):
                 Sim_mon_data=t2m[sim_mon==i,z,:]
-                Obs_mon_data=Obs_full_data[Obs_mon==i,z,:,:].astype('float64')
-                nan_filter=np.isnan(Station_Mask[:,:])
-                for j in range(0,lat_len):
-                    for k in range(0,lon_len):
-                        if nan_filter[j,k]:
-                            Obs_mon_data[:,j,k]=np.nan
                 Sim_season_di[i,z]=np.nanmean(Sim_mon_data)-Sim_mon_mean
-                Obs_season_di[i,z]=np.nanmean(Obs_mon_data)-Obs_mon_mean
         Adj_vectors=Obs_season_di-Sim_season_di
         #Now need to adjust each of the grid cells
         for j in range(0,len(S_Filenames)):
@@ -384,7 +389,7 @@ def Temperature_Cycle_Adjust(Base_S_dir,observation_dir,Sim_num,start_year=1950,
             f_t_name=Sim_Dir+'tmp_'+S_Filenames[j]
             if os.path.isfile(f_t_name):
                 os.remove(f_t_name)
-            tmp_data.to_netcdf(f_t_name)
+            write_weather(tmp_data, f_t_name)
             tmp_data.close()
     Obs_t2m.close()
     return
@@ -440,7 +445,7 @@ def adjust_metadata(Base_S_dir, Sim_num):
                     ds[key] = (('simulation_time', 'latitude', 'longitude'), grid(values))
             if 'Altitude' in data:
                 ds['Altitude'] = data['Altitude']
-            ds.to_netcdf(directory + 'tmp_' + filename)
+            write_weather(ds, directory + 'tmp_' + filename)
             ds.close()
             data.close()
 
@@ -462,7 +467,7 @@ def add_alt_metadata(Base_S_dir, Sim_num):
             for name, attrs in attributes.items():
                 if name in data:
                     data[name].attrs.update(attrs)
-            data.to_netcdf(directory + 'tmp_' + filename)
+            write_weather(data, directory + 'tmp_' + filename)
             data.close()
 
 def Nonstationairy_mode(Base_S_dir, observation_dir, Sim_num, start_year=1950, end_year=2022):
@@ -490,7 +495,7 @@ def Nonstationairy_mode(Base_S_dir, observation_dir, Sim_num, start_year=1950, e
                     data[key] = data[key] + xr.DataArray(adjustment, dims='simulation_time')
             if 'simulation_d2m' in data:
                 data['simulation_RH'] = (100 * model_rh(data)).clip(max=100)
-            data.to_netcdf(directory + 'tmp_' + filename)
+            write_weather(data, directory + 'tmp_' + filename)
             data.close()
 
 def model_rh(data):
